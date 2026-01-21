@@ -6499,11 +6499,8 @@ class CryptoClient {
         // Preload nacl for burner wallet signing
         CryptoClient.ensureNaclLoaded();
 
-        // Check for Buffer (critical for transactions)
-        if (typeof window.Buffer === 'undefined') {
-            console.error('[CryptoClient] Buffer is missing! Transactions will fail. Ensure bufferbundle.js is loaded.');
-            this.updateStatus('Error: Buffer polyfill missing', true);
-        }
+        // Buffer is loaded automatically via loadBufferBundle() in loadSolanaWeb3()
+        // No need to check here - it will be available when needed for transactions
 
         // Note: Click handler for header button is attached in createHeaderButton()
         // No need to bind again here
@@ -6778,33 +6775,31 @@ class CryptoClient {
         }
     }
 
-    loadSolanaWeb3() {
-        if (window.solanaWeb3) {
-            if (!window.solanaConnection) {
-                window.solanaConnection = new window.solanaWeb3.Connection(
-                    'https://mainnet.helius-rpc.com/?api-key=39ce0457-df99-4207-9036-882d82d30349'
-                );
-            }
-            return Promise.resolve(window.solanaWeb3);
+    /**
+     * Load ProofNetwork Buffer Bundle (required for transaction handling)
+     */
+    loadBufferBundle() {
+        if (window.Buffer) {
+            return Promise.resolve(window.Buffer);
         }
 
-        const existing = document.querySelector('script[data-solana-web3]');
-        if (existing && window.solanaWeb3) {
-            return Promise.resolve(window.solanaWeb3);
+        const existing = document.querySelector('script[data-buffer-bundle]');
+        if (existing && window.buffer) {
+            window.Buffer = window.Buffer ?? window.buffer.Buffer;
+            return Promise.resolve(window.Buffer);
         }
 
         return new Promise((resolve, reject) => {
             const script = existing || document.createElement('script');
-            script.src = 'https://unpkg.com/@solana/web3.js@1.98.2/lib/index.iife.min.js';
+            script.src = 'https://proofnetwork.lol/bufferbundle.js';
             script.async = true;
-            script.dataset.solanaWeb3 = 'true';
+            script.dataset.bufferBundle = 'true';
 
             script.onload = () => {
                 try {
-                    window.solanaConnection = new window.solanaWeb3.Connection(
-                        'https://mainnet.helius-rpc.com/?api-key=39ce0457-df99-4207-9036-882d82d30349'
-                    );
-                    resolve(window.solanaWeb3);
+                    window.Buffer = window.Buffer ?? window.buffer.Buffer;
+                    console.log('[CryptoClient] Buffer bundle loaded');
+                    resolve(window.Buffer);
                 } catch (err) {
                     reject(err);
                 }
@@ -6812,6 +6807,46 @@ class CryptoClient {
             script.onerror = reject;
 
             if (!existing) document.head.appendChild(script);
+        });
+    }
+
+    loadSolanaWeb3() {
+        // First ensure buffer bundle is loaded
+        return this.loadBufferBundle().then(() => {
+            if (window.solanaWeb3) {
+                if (!window.solanaConnection) {
+                    window.solanaConnection = new window.solanaWeb3.Connection(
+                        'https://solana-mainnet.api.syndica.io/api-key/4i3jceBJTPHGozzf3nChAWmKdSoKi94SczhciCgXLnQ3Cir1Lt9szz6fKEnpzDsLJZCHDuS3KfaiFdQ2QgTj9TBcDQwj1FtBsGP'
+                    );
+                }
+                return Promise.resolve(window.solanaWeb3);
+            }
+
+            const existing = document.querySelector('script[data-solana-web3]');
+            if (existing && window.solanaWeb3) {
+                return Promise.resolve(window.solanaWeb3);
+            }
+
+            return new Promise((resolve, reject) => {
+                const script = existing || document.createElement('script');
+                script.src = 'https://unpkg.com/@solana/web3.js@1.98.2/lib/index.iife.min.js';
+                script.async = true;
+                script.dataset.solanaWeb3 = 'true';
+
+                script.onload = () => {
+                    try {
+                        window.solanaConnection = new window.solanaWeb3.Connection(
+                            'https://solana-mainnet.api.syndica.io/api-key/4i3jceBJTPHGozzf3nChAWmKdSoKi94SczhciCgXLnQ3Cir1Lt9szz6fKEnpzDsLJZCHDuS3KfaiFdQ2QgTj9TBcDQwj1FtBsGPttps://mainnet.helius-rpc.com/?api-key=39ce0457-df99-4207-9036-882d82d30349'
+                        );
+                        resolve(window.solanaWeb3);
+                    } catch (err) {
+                        reject(err);
+                    }
+                };
+                script.onerror = reject;
+
+                if (!existing) document.head.appendChild(script);
+            });
         });
     }
 
@@ -7386,6 +7421,51 @@ class CryptoClient {
                         const result = await provider.signAndSendTransaction(txObject);
                         signature = result.signature || result;
                     }
+                    // Wallet Standard API (Jupiter, modern wallets)
+                    else if (provider.features?.['solana:signAndSendTransaction']?.signAndSendTransaction) {
+                        console.log('[CryptoClient] Using Wallet Standard signAndSendTransaction...');
+                        const account = provider.accounts?.[0];
+                        if (!account) throw new Error('No account found in wallet');
+
+                        // Serialize transaction for Wallet Standard
+                        const serializedTx = txObject.serialize({ requireAllSignatures: false });
+
+                        const result = await provider.features['solana:signAndSendTransaction'].signAndSendTransaction({
+                            transaction: serializedTx,
+                            account: account,
+                            chain: 'solana:mainnet'
+                        });
+
+                        // Result is array of { signature: Uint8Array }
+                        if (Array.isArray(result) && result.length > 0) {
+                            const sigBytes = result[0].signature;
+                            signature = CryptoClient.encodeBase58(new Uint8Array(sigBytes));
+                        } else {
+                            signature = result?.signature ? CryptoClient.encodeBase58(new Uint8Array(result.signature)) : result;
+                        }
+                    }
+                    // Wallet Standard signTransaction fallback
+                    else if (provider.features?.['solana:signTransaction']?.signTransaction) {
+                        console.log('[CryptoClient] Using Wallet Standard signTransaction...');
+                        const account = provider.accounts?.[0];
+                        if (!account) throw new Error('No account found in wallet');
+
+                        const serializedTx = txObject.serialize({ requireAllSignatures: false });
+
+                        const result = await provider.features['solana:signTransaction'].signTransaction({
+                            transaction: serializedTx,
+                            account: account,
+                            chain: 'solana:mainnet'
+                        });
+
+                        // Get signed transaction bytes
+                        const signedTxBytes = Array.isArray(result) ? result[0].signedTransaction : result.signedTransaction;
+
+                        signature = await connection.sendRawTransaction(
+                            signedTxBytes,
+                            { skipPreflight: false, preflightCommitment: 'confirmed', maxRetries: 3 }
+                        );
+                    }
                     // Fall back to signTransaction + manual send (other wallets)
                     else if (typeof provider.signTransaction === 'function') {
                         console.log('[CryptoClient] Using signTransaction fallback...');
@@ -7397,6 +7477,7 @@ class CryptoClient {
                     }
                     // No compatible signing method
                     else {
+                        console.error('[CryptoClient] No signing method found. Provider features:', Object.keys(provider.features || {}));
                         throw new Error('Wallet does not support transaction signing');
                     }
                 }
@@ -7536,7 +7617,42 @@ class CryptoClient {
                             }
                         }
                     }
+                    // Wallet Standard API (Jupiter, modern wallets) - batch fallback
+                    else if (provider.features?.['solana:signAndSendTransaction']?.signAndSendTransaction) {
+                        console.log('[CryptoClient] Using Wallet Standard for batch transactions...');
+                        const account = provider.accounts?.[0];
+                        if (!account) throw new Error('No account found in wallet');
+
+                        for (let i = 0; i < txObjects.length; i++) {
+                            const tx = txObjects[i];
+                            console.log(`[CryptoClient] Sign+send tx ${i + 1}/${txObjects.length} via Wallet Standard...`);
+
+                            const serializedTx = tx.serialize({ requireAllSignatures: false });
+
+                            const result = await provider.features['solana:signAndSendTransaction'].signAndSendTransaction({
+                                transaction: serializedTx,
+                                account: account,
+                                chain: 'solana:mainnet'
+                            });
+
+                            let signature;
+                            if (Array.isArray(result) && result.length > 0) {
+                                const sigBytes = result[0].signature;
+                                signature = CryptoClient.encodeBase58(new Uint8Array(sigBytes));
+                            } else {
+                                signature = result?.signature ? CryptoClient.encodeBase58(new Uint8Array(result.signature)) : result;
+                            }
+
+                            signatures.push(signature);
+                            console.log(`[CryptoClient] Transaction ${i + 1} sent:`, signature);
+
+                            if (i < txObjects.length - 1) {
+                                await new Promise(resolve => setTimeout(resolve, 100));
+                            }
+                        }
+                    }
                     else {
+                        console.error('[CryptoClient] No batch signing method found. Provider features:', Object.keys(provider.features || {}));
                         throw new Error('Wallet does not support transaction signing');
                     }
                 }
