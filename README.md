@@ -91,9 +91,13 @@ wallet.hideOverlay();
 ### Signing
 
 ```javascript
-// Sign a message
+// Sign a message with the currently connected wallet
 const result = await wallet.signMessage('Hello', 'utf8');
 // Returns: { signature, signatureBase58, signatureBase64, signatureHex, publicKey, message }
+
+// Sign a message with a specific burner wallet (no wallet switch required)
+const burnerResult = await wallet.signMessageWithBurner('Hello', burnerId);
+// Returns: { signature, signatureBase58, signatureBase64, publicKey, message }
 
 // Sign and send a transaction
 const txResult = await wallet.signAndSendTransaction(base64Transaction, {
@@ -131,6 +135,21 @@ const result = await wallet.bulkSwap([
         walletAddress: 'BurnerPublicKey',
         urgent: true
     }
+]);
+```
+
+### Burner Transfers
+
+```javascript
+// Single-recipient SOL transfer from a burner (convenience wrapper)
+const result = await wallet.transferFromBurner(fromWalletObj, toAddress, 0.05);
+// Returns: { success, signature } or { success: false, error }
+
+// Multi-recipient SOL transfer from a single burner in one transaction.
+// When window.privacyMode === true, transfers are routed through PrivacyCash.
+const multi = await wallet.transferFromBurnerMulti(fromWalletObj, [
+    { address: 'RecipientA...', amount: 0.01 },
+    { address: 'RecipientB...', amount: 0.02 }
 ]);
 ```
 
@@ -185,6 +204,21 @@ const provider = CryptoClient.getJupiterProvider();
 // Get Wallet Standard wallets
 const standardWallets = CryptoClient.getWalletStandardWallets();
 ```
+
+### Balance Queries
+
+```javascript
+// Batch-fetch SOL balances for many wallets with retry + chunking.
+// Returns an array aligned 1:1 with `pubkeys`, each element either
+// { lamports: <number> } or null on failure for that slot.
+const pubkeys = burners.map(b => new solanaWeb3.PublicKey(b.publicKey));
+const infos = await CryptoClient.batchGetAccountsInfo(pubkeys);
+const sol = infos.map(i => (i ? i.lamports / 1e9 : 0));
+```
+
+Internally chunks into groups of 5 and parallelises `getBalance` per chunk
+with up to 3 retries (300 ms × attempt backoff). A failed chunk degrades
+to `null` slots rather than throwing — callers can render those as `0`.
 
 ### Encoding Utilities
 
@@ -282,13 +316,19 @@ wallet.showErrorModal('Error', 'Transfer failed', errorDetails);
 
 ## RPC Endpoints
 
-| Endpoint | Usage |
-|----------|-------|
-| Syndica RPC | Burner wallet transactions |
-| Helius RPC | Balance queries |
+RPC URLs are served from a **pool-backed accessor**, not a static endpoint.
+`CryptoClient.SYNDICA_RPC` is a getter that asks `window.solRpcPool.pickUrl()`
+which endpoint to route the current read through — so the value reflects
+live bucket state (rate-limit-aware routing), not a hard-coded URL. If the
+pool isn't loaded, it falls back to `api.mainnet-beta.solana.com`.
+
+The actual per-request routing happens via a patched
+`Connection.prototype._rpcRequest`; the getter is used mainly for
+`connection.rpcEndpoint` introspection and the very first request before
+the patch lands.
 
 ```javascript
-// Access Syndica RPC endpoint
+// Snapshot of the currently-picked endpoint
 const rpc = CryptoClient.SYNDICA_RPC;
 ```
 
