@@ -21,10 +21,11 @@ const patchSolanaConnection = (function () {
     'use strict';
 
     const EMPIRICAL_SPECS = {
-        'https://solana.lava.build': {
-            read: { burst: 50, refillPerSec: 50 },
-            write: { burst: 200, refillPerSec: 10 },
-        },
+        // ☠ 'https://solana.lava.build' REMOVED 2026-08-29 — DISCONTINUED. It now
+        // answers every method with HTTP 200 + {"error":"This endpoint has been
+        // discontinued.","message":"…"} — a BARE STRING `error`, not a JSON-RPC
+        // envelope. It also held the largest write bucket here (200/+10s), so it
+        // won most sendTransaction picks and broke sends outright. Do NOT re-add.
         'https://solana-rpc.publicnode.com': {
             read: { burst: 200, refillPerSec: 30 },
             write: { burst: 200, refillPerSec: 10 },
@@ -42,7 +43,7 @@ const patchSolanaConnection = (function () {
     const FALLBACK_SPEC = { read: { burst: 20, refillPerSec: 10 }, write: { burst: 10, refillPerSec: 2 } };
 
     const DEFAULT_URLS = [
-        'https://solana.lava.build',
+        // lava.build removed 2026-08-29 (discontinued) — see EMPIRICAL_SPECS above.
         'https://solana-rpc.publicnode.com',
         'https://api.mainnet-beta.solana.com',
         'https://api.tatum.io/v3/blockchain/node/solana-mainnet',
@@ -156,6 +157,24 @@ const patchSolanaConnection = (function () {
                     let json;
                     try { json = JSON.parse(text); }
                     catch (e) { ep.totalErrors++; throw new Error('Non-JSON response from ' + ep.url + ': ' + text.slice(0, 200)); }
+                    // Valid JSON that is NOT a JSON-RPC envelope => this endpoint is
+                    // broken or decommissioned. lava.build did exactly this once
+                    // retired: HTTP 200 with a BARE STRING `error`, so the check
+                    // below reads json.error.message as undefined and the call died
+                    // terminally with no failover. A non-JSON-RPC reply proves the
+                    // request was never processed as one — nothing was sent — so it
+                    // is safe to park the endpoint and try the next, even for a write.
+                    const rpcEnvelope = json && typeof json === 'object' && !Array.isArray(json) &&
+                        (Object.prototype.hasOwnProperty.call(json, 'result') ||
+                         (json.error !== null && typeof json.error === 'object'));
+                    if (!rpcEnvelope) {
+                        ep.totalErrors++;
+                        ep.read.rateLimitedUntil = Date.now() + 1800000;
+                        ep.write.rateLimitedUntil = Date.now() + 1800000;
+                        if (this.verbose) console.log('[sol-rpc-pool] ' + ep.url + ' returned a non-JSON-RPC body (endpoint broken/decommissioned); parking 30m and failing over');
+                        attempt++;
+                        continue;
+                    }
                     if (json.error) {
                         ep.totalErrors++;
                         throw new Error(ep.url + ' error: ' + (json.error.message || JSON.stringify(json.error)));
