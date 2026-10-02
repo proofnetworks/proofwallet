@@ -7847,21 +7847,17 @@ class CryptoClient {
 
         content.appendChild(walletGrid);
 
-        // Fetch balances asynchronously
+        // Fetch balances asynchronously (batched)
         (async () => {
-            const connection = new web3.Connection(CryptoClient.SYNDICA_RPC, 'confirmed');
-            for (const card of walletCards) {
-                try {
-                    const pubkey = new web3.PublicKey(card.wallet.publicKey);
-                    const bal = await connection.getBalance(pubkey);
-                    const solBal = bal / 1e9;
-                    if (card.balanceEl) {
-                        card.balanceEl.textContent = solBal.toFixed(4) + ' SOL';
-                    }
-                } catch (err) {
-                    if (card.balanceEl) card.balanceEl.textContent = '—';
-                }
-            }
+            let infos = [];
+            try {
+                infos = await CryptoClient.batchGetAccountsInfo(walletCards.map(c => new web3.PublicKey(c.wallet.publicKey)));
+            } catch (err) { /* each card falls back to a dash below */ }
+            walletCards.forEach((card, i) => {
+                if (!card.balanceEl) return;
+                const info = infos[i];
+                card.balanceEl.textContent = info ? (info.lamports / 1e9).toFixed(4) + ' SOL' : '\u2014';
+            });
         })();
 
         // Amount section (shown when wallets selected)
@@ -8266,11 +8262,12 @@ class CryptoClient {
     }
 
     /**
-     * Batch-fetch SOL balances with retry + chunking to handle flaky RPCs.
-     * Uses getBalance per pubkey (parallelised per chunk) rather than
-     * getMultipleAccountsInfo. The return shape is kept identical — an array
-     * of { lamports } objects (or null) aligned 1:1 with `pubkeys` — so every
-     * caller that reads `.lamports` keeps working unchanged.
+     * Batch-fetch SOL balances: one getMultipleAccounts call per 10 keys (10 is
+     * publicnode's per-call cap; the pool skips members that deny the method),
+     * chunks in parallel, retried, and a chunk that still fails falls back to
+     * getBalance per key. A key with no account on chain is { lamports: 0 }.
+     * Return shape: an array of { lamports } objects (or null if even the
+     * fallback failed) aligned 1:1 with `pubkeys`.
      * @param {PublicKey[]} pubkeys
      * @param {Connection} connection  (optional — creates one if omitted)
      * @returns {Array<{lamports:number}|null>}
@@ -8281,31 +8278,32 @@ class CryptoClient {
         if (!connection) {
             connection = new web3.Connection(CryptoClient.SYNDICA_RPC, 'confirmed');
         }
-        const BATCH = 5;
-        const MAX_RETRIES = 3;
+        const BATCH = 10;
+        const MAX_RETRIES = 2;
         const results = new Array(pubkeys.length).fill(null);
 
-        for (let i = 0; i < pubkeys.length; i += BATCH) {
+        const fetchChunk = async (i) => {
             const chunk = pubkeys.slice(i, i + BATCH);
-            let lastErr;
             for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
                 try {
-                    const lamports = await Promise.all(
-                        chunk.map(pk => connection.getBalance(pk))
-                    );
-                    lamports.forEach((bal, j) => { results[i + j] = { lamports: bal }; });
-                    lastErr = null;
-                    break;
+                    const infos = await connection.getMultipleAccountsInfo(chunk, 'confirmed');
+                    infos.forEach((info, j) => { results[i + j] = { lamports: info ? info.lamports : 0 }; });
+                    return;
                 } catch (err) {
-                    lastErr = err;
-                    console.warn('[CryptoClient] batchGetAccountsInfo chunk retry', attempt + 1, err.message);
+                    console.warn('[CryptoClient] getMultipleAccounts chunk retry', attempt + 1, err.message);
                     await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
                 }
             }
-            if (lastErr) {
-                console.error('[CryptoClient] batchGetAccountsInfo chunk failed after retries:', lastErr);
-            }
-        }
+            // last resort: one getBalance per key in this chunk
+            await Promise.all(chunk.map(async (pk, j) => {
+                try { results[i + j] = { lamports: await connection.getBalance(pk) }; }
+                catch (err) { console.error('[CryptoClient] balance unavailable for', pk.toBase58 ? pk.toBase58() : pk, err.message); }
+            }));
+        };
+
+        const starts = [];
+        for (let i = 0; i < pubkeys.length; i += BATCH) starts.push(i);
+        await Promise.all(starts.map(fetchChunk));
         return results;
     }
 
@@ -8472,6 +8470,45 @@ class CryptoClient {
         // Track selected wallets
         const selectedWallets = new Map();
 
+        // Amounts are what EXECUTE, so they are always visible and exact:
+        //  - selecting wallets (checkbox / Select All) or typing a Total fills them;
+        //  - with a Total: split evenly across selected funded wallets (capped at
+        //    each wallet's spendable balance, remainder to the first);
+        //    with no Total: each wallet's spendable balance (keeps a fee buffer);
+        //  - an amount the user typed by hand is kept until Even Split resets it;
+        //  - values are floored to 4 decimals and stored exactly as shown.
+        const FEE_BUFFER = 0.002;
+        const floor4 = (v) => Math.floor((v + 1e-9) * 1e4) / 1e4;
+        const spendable = (d) => floor4(Math.max(0, d.wallet.balanceSOL - FEE_BUFFER));
+        const isFunded = (d) => d.wallet.balanceSOL > 0.001;
+        const setAmount = (d, v) => {
+            const a = Math.max(0, floor4(v));
+            d.amount = a;
+            d.amountInput.value = a > 0 ? a.toFixed(4) : '';
+        };
+        const autoFill = () => {
+            const chosen = Array.from(selectedWallets.values()).filter(d => d.selected && isFunded(d));
+            const auto = chosen.filter(d => !d.manual);
+            if (auto.length === 0) { updateSummary(); return; }
+            const total = parseFloat(totalSolInput.value);
+            if (total > 0) {
+                const pinned = chosen.filter(d => d.manual).reduce((sum, d) => sum + d.amount, 0);
+                const remaining = Math.max(0, total - pinned);
+                const per = floor4(remaining / auto.length);
+                auto.forEach(d => setAmount(d, Math.min(per, spendable(d))));
+                // hand any remainder (rounding, or a capped wallet's share) to wallets with room
+                let leftover = floor4(remaining - auto.reduce((sum, d) => sum + d.amount, 0));
+                for (const d of auto) {
+                    if (leftover <= 0) break;
+                    const add = floor4(Math.min(leftover, spendable(d) - d.amount));
+                    if (add > 0) { setAmount(d, d.amount + add); leftover = floor4(leftover - add); }
+                }
+            } else {
+                auto.forEach(d => setAmount(d, spendable(d)));
+            }
+            updateSummary();
+        };
+
         walletData.forEach(wallet => {
             const card = document.createElement('div');
             card.className = 'cc-bulk-wallet-card';
@@ -8507,6 +8544,7 @@ class CryptoClient {
                 wallet,
                 selected: false,
                 amount: 0,
+                manual: false,
                 checkbox,
                 amountInput
             });
@@ -8521,14 +8559,16 @@ class CryptoClient {
                 if (!checkbox.checked) {
                     amountInput.value = '';
                     data.amount = 0;
+                    data.manual = false;
                 }
-                updateSummary();
+                autoFill();
             });
 
-            // Amount change
+            // Amount change (typed by hand: keep it, auto-fill works around it)
             amountInput.addEventListener('input', () => {
                 const data = selectedWallets.get(wallet.id);
-                data.amount = parseFloat(amountInput.value) || 0;
+                data.amount = Math.max(0, floor4(parseFloat(amountInput.value) || 0));
+                data.manual = amountInput.value.trim() !== '';
                 updateSummary();
             });
 
@@ -8606,14 +8646,17 @@ class CryptoClient {
         const updateSummary = () => {
             let totalSOL = 0;
             let walletCount = 0;
+            let selectedCount = 0;
             selectedWallets.forEach((data) => {
+                if (data.selected) selectedCount++;
                 if (data.selected && data.amount > 0) {
                     totalSOL += data.amount;
                     walletCount++;
                 }
             });
-            summaryWallets.textContent = walletCount;
-            summaryTotal.textContent = totalSOL.toFixed(4) + ' SOL';
+            // "2 of 3" when some selected wallets have nothing to spend
+            summaryWallets.textContent = walletCount === selectedCount ? String(walletCount) : `${walletCount} of ${selectedCount}`;
+            summaryTotal.textContent = floor4(totalSOL).toFixed(4) + ' SOL';
         };
 
         // Select all handler - only selects wallets with balance > 0
@@ -8631,65 +8674,33 @@ class CryptoClient {
                 if (!shouldSelect) {
                     data.amountInput.value = '';
                     data.amount = 0;
+                    data.manual = false;
                 }
             });
-            updateSummary();
+            autoFill();
         });
 
-        // Even split handler - skips wallets with 0 balance
+        // Total SOL re-splits live (no need to press Even Split)
+        totalSolInput.addEventListener('input', () => autoFill());
+
+        // Even split handler - skips wallets with 0 balance; resets hand-typed amounts
         splitBtn.addEventListener('click', () => {
-            // Only count wallets with actual balance
-            let fundedSelected = Array.from(selectedWallets.values()).filter(
-                d => d.selected && d.wallet.balanceSOL > 0.001
-            );
+            let fundedSelected = Array.from(selectedWallets.values()).filter(d => d.selected && isFunded(d));
 
             // If no funded wallets selected, auto-select all funded wallets
             if (fundedSelected.length === 0) {
                 selectAllCheckbox.checked = true;
                 selectedWallets.forEach((data) => {
-                    const hasFunds = data.wallet.balanceSOL > 0.001;
-                    if (hasFunds) {
+                    if (isFunded(data)) {
                         data.checkbox.checked = true;
                         data.selected = true;
                         data.amountInput.disabled = false;
                         data.checkbox.closest('.cc-bulk-wallet-card').classList.add('selected');
                     }
                 });
-                fundedSelected = Array.from(selectedWallets.values()).filter(
-                    d => d.selected && d.wallet.balanceSOL > 0.001
-                );
             }
-
-            if (fundedSelected.length === 0) return;
-
-            const totalSolValue = parseFloat(totalSolInput.value);
-
-            if (totalSolValue > 0) {
-                // Split specified amount only across funded wallets
-                const perWallet = totalSolValue / fundedSelected.length;
-                fundedSelected.forEach(data => {
-                    data.amountInput.value = perWallet.toFixed(4);
-                    data.amount = perWallet;
-                });
-            } else {
-                // Use wallet balances - only from funded wallets
-                let totalAvailable = 0;
-                fundedSelected.forEach(data => {
-                    totalAvailable += data.wallet.balanceSOL;
-                });
-
-                const feeBuffer = 0.002 * fundedSelected.length;
-                const distributable = Math.max(0, totalAvailable - feeBuffer);
-                const perWallet = distributable / fundedSelected.length;
-
-                fundedSelected.forEach(data => {
-                    const maxForWallet = Math.max(0, data.wallet.balanceSOL - 0.002);
-                    const amount = Math.min(perWallet, maxForWallet);
-                    data.amountInput.value = amount.toFixed(4);
-                    data.amount = amount;
-                });
-            }
-            updateSummary();
+            selectedWallets.forEach((data) => { data.manual = false; });
+            autoFill();
         });
 
         // Execute button handler
