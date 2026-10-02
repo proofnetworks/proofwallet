@@ -14,7 +14,7 @@ If you're building a UI for a ProofNetwork contract — game, marketplace, DAO, 
 - **Transaction sending** — auto-detects burner keypair; signs and submits legacy or versioned transactions
 - **Pool-backed RPC** — every read routes through `window.solRpcPool` so rate-limit-aware endpoint selection happens for free
 - **Bulk operations** — multi-recipient SOL transfers, bulk token swaps, atomic multi-transfer txs
-- **Privacy mode** — `window.privacyMode = true` routes transfers through PrivacyCash and restricts the wallet picker to burners
+- **Privacy mode** — `window.privacyMode = true` routes burner transfers through PrivacyCash (a "Private Transfer" sheet in sky blue and a private-transfer receipt); the wallet picker is unchanged
 - **Polling** — `pollContract(fn, …, frequency, onUpdate)` for view functions with an automatic error budget
 - **Drop-in UI** — auto-rendered Connect button, wallet-selection modal, toasts, result modals
 - **Privy-style skin** — a compact light/dark dialog (bottom sheet on phones) with your logo, one accent colour, a persisted theme toggle and a connect confirmation; `skin: 'classic'` keeps the original dark sheet
@@ -485,9 +485,10 @@ document.dispatchEvent(new CustomEvent('privacyModeChanged', { detail: { enabled
 
 When set:
 
-- Extension wallets are hidden in the picker (burners only)
 - `transferFromBurnerMulti` routes through the PrivacyCash API
-- Privacy badges appear on modals
+- The transfer sheet becomes "Private Transfer" with a PrivacyCash badge and a sky-blue accent (kept under the privy skin, light and dark)
+- A completed send shows the private-transfer receipt (`showPrivacyTransferSuccess`): deposit tx + per-recipient results
+- The wallet picker is unchanged — extension wallets stay available; `privacyModeChanged` just re-renders it if open
 
 Toggle back with `window.privacyMode = false` and the same `privacyModeChanged` event.
 

@@ -5101,6 +5101,46 @@ class CryptoClient {
                 border-radius: 10px;
                 color: var(--cc-skin-danger-ink);
             }
+
+            /* ── result modals (success / error / private transfer) ──────────────
+               built with inline styles; every colour is written as
+               var(--cc-skin-…, <classic value>), so these vars exist only under
+               the skin and the classic sheet renders exactly as before. */
+            html[data-cc-wallet-theme="light"] {
+                --cc-skin-ink: #101828;
+                --cc-skin-ink-2: #475467;
+                --cc-skin-ink-3: #667085;
+                --cc-skin-panel: #f7f7f9;
+                --cc-skin-panel-2: #ffffff;
+                --cc-skin-hairline: #eff1f5;
+                --cc-skin-btn: #f2f3f7;
+                --cc-skin-privacy-surface: #ffffff;
+                --cc-skin-privacy-ink: #0369a1;
+                --cc-skin-privacy-link: #0284c7;
+            }
+            html[data-cc-wallet-theme="dark"] {
+                --cc-skin-ink: #f2f3fa;
+                --cc-skin-ink-2: #a5abc0;
+                --cc-skin-ink-3: #717892;
+                --cc-skin-panel: rgba(255, 255, 255, 0.045);
+                --cc-skin-panel-2: rgba(255, 255, 255, 0.03);
+                --cc-skin-hairline: rgba(255, 255, 255, 0.07);
+                --cc-skin-btn: rgba(255, 255, 255, 0.09);
+                --cc-skin-privacy-surface: radial-gradient(120% 55% at 50% -8%, rgba(14, 165, 233, 0.16), transparent 60%), linear-gradient(180deg, #0c1219, #070b10);
+                --cc-skin-privacy-ink: #7dd3fc;
+                --cc-skin-privacy-link: #38bdf8;
+            }
+            html[data-cc-wallet-theme] .cc-modal-backdrop:not(#cc-wallet-modal) > .cc-modal {
+                font-family: var(--cc-skin-font);
+                -webkit-font-smoothing: antialiased;
+                border-color: var(--cc-border);
+                border-radius: 24px;
+                box-shadow: 0 20px 50px -12px rgba(16, 24, 40, 0.4), 0 4px 12px rgba(16, 24, 40, 0.08);
+            }
+            html[data-cc-wallet-theme] .cc-modal-backdrop:not(#cc-wallet-modal) > .cc-modal * { font-family: inherit; }
+            html[data-cc-wallet-theme="dark"] .cc-modal-backdrop:not(#cc-wallet-modal) > .cc-modal:not(.cc-privacy-success-modal) {
+                background: linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo));
+            }
         `;
         document.head.appendChild(styles);
 
@@ -6708,32 +6748,32 @@ class CryptoClient {
 
         // Title
         const titleEl = document.createElement('h3');
-        titleEl.style.cssText = 'color: #fff; margin: 0 0 8px 0; font-size: 20px;';
+        titleEl.style.cssText = 'color: var(--cc-skin-ink, #fff); margin: 0 0 8px 0; font-size: 20px;';
         titleEl.textContent = title;
         modal.appendChild(titleEl);
 
         // Message
         const messageEl = document.createElement('p');
-        messageEl.style.cssText = 'color: rgba(255,255,255,0.6); font-size: 14px; margin: 0 0 16px 0;';
+        messageEl.style.cssText = 'color: var(--cc-skin-ink-2, rgba(255,255,255,0.6)); font-size: 14px; margin: 0 0 16px 0;';
         messageEl.textContent = message;
         modal.appendChild(messageEl);
 
         // Details list
         if (details.length > 0) {
             const detailsBox = document.createElement('div');
-            detailsBox.style.cssText = 'background: rgba(255,255,255,0.05); border-radius: 10px; padding: 12px; margin-bottom: 16px; text-align: left;';
+            detailsBox.style.cssText = 'background: var(--cc-skin-panel, rgba(255,255,255,0.05)); border-radius: 10px; padding: 12px; margin-bottom: 16px; text-align: left;';
 
             details.forEach(detail => {
                 const detailRow = document.createElement('div');
-                detailRow.style.cssText = 'display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);';
-                detailRow.style.borderBottom = details.indexOf(detail) === details.length - 1 ? 'none' : '1px solid rgba(255,255,255,0.05)';
+                detailRow.style.cssText = 'display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--cc-skin-hairline, rgba(255,255,255,0.05));';
+                detailRow.style.borderBottom = details.indexOf(detail) === details.length - 1 ? 'none' : '1px solid var(--cc-skin-hairline, rgba(255,255,255,0.05))';
 
                 const label = document.createElement('span');
-                label.style.cssText = 'color: rgba(255,255,255,0.5); font-size: 12px;';
+                label.style.cssText = 'color: var(--cc-skin-ink-3, rgba(255,255,255,0.5)); font-size: 12px;';
                 label.textContent = detail.label;
 
                 const value = document.createElement('span');
-                value.style.cssText = 'color: #fff; font-size: 12px; font-weight: 500;';
+                value.style.cssText = 'color: var(--cc-skin-ink, #fff); font-size: 12px; font-weight: 500;';
                 value.textContent = detail.value;
 
                 detailRow.appendChild(label);
@@ -6746,7 +6786,7 @@ class CryptoClient {
 
         // Close button
         const closeBtn = document.createElement('button');
-        closeBtn.style.cssText = 'width: 100%; padding: 14px; border-radius: 12px; border: none; background: rgba(255,255,255,0.1); color: #fff; cursor: pointer; font-weight: 600; font-size: 14px;';
+        closeBtn.style.cssText = 'width: 100%; padding: 14px; border-radius: 12px; border: none; background: var(--cc-skin-btn, rgba(255,255,255,0.1)); color: var(--cc-skin-ink, #fff); cursor: pointer; font-weight: 600; font-size: 14px;';
         closeBtn.textContent = 'Done';
         closeBtn.addEventListener('click', () => overlay.remove());
         modal.appendChild(closeBtn);
@@ -6769,7 +6809,7 @@ class CryptoClient {
 
         const modal = document.createElement('div');
         modal.className = 'cc-modal cc-privacy-success-modal';
-        modal.style.cssText = 'max-width: 440px; text-align: center; background: linear-gradient(180deg, #0a0f14 0%, #060a0d 100%); border: 1px solid rgba(56, 189, 248, 0.2);';
+        modal.style.cssText = 'max-width: 440px; text-align: center; background: var(--cc-skin-privacy-surface, linear-gradient(180deg, #0a0f14 0%, #060a0d 100%)); border: 1px solid rgba(56, 189, 248, 0.2);';
 
         // Shield icon (privacy theme)
         const iconContainer = document.createElement('div');
@@ -6798,13 +6838,13 @@ class CryptoClient {
 
         // Title
         const titleEl = document.createElement('h3');
-        titleEl.style.cssText = 'color: #7dd3fc; margin: 0 0 4px 0; font-size: 20px;';
+        titleEl.style.cssText = 'color: var(--cc-skin-privacy-ink, #7dd3fc); margin: 0 0 4px 0; font-size: 20px;';
         titleEl.textContent = 'Private Transfer Complete';
         modal.appendChild(titleEl);
 
         // Subtitle badge
         const badge = document.createElement('div');
-        badge.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 20px; font-size: 11px; font-weight: 600; color: #7dd3fc; margin-bottom: 16px;';
+        badge.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 20px; font-size: 11px; font-weight: 600; color: var(--cc-skin-privacy-ink, #7dd3fc); margin-bottom: 16px;';
         badge.textContent = 'Via PrivacyCash';
         modal.appendChild(badge);
 
@@ -6813,7 +6853,7 @@ class CryptoClient {
         depositSection.style.cssText = 'background: rgba(56, 189, 248, 0.06); border: 1px solid rgba(56, 189, 248, 0.12); border-radius: 12px; padding: 14px; margin-bottom: 12px; text-align: left;';
 
         const depositHeader = document.createElement('div');
-        depositHeader.style.cssText = 'font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: rgba(255,255,255,0.4); margin-bottom: 10px;';
+        depositHeader.style.cssText = 'font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--cc-skin-ink-3, rgba(255,255,255,0.4)); margin-bottom: 10px;';
         depositHeader.textContent = 'Deposit';
         depositSection.appendChild(depositHeader);
 
@@ -6823,10 +6863,10 @@ class CryptoClient {
         const addStat = (label, value, highlight = false) => {
             const stat = document.createElement('div');
             const statLabel = document.createElement('div');
-            statLabel.style.cssText = 'font-size: 11px; color: rgba(255,255,255,0.4);';
+            statLabel.style.cssText = 'font-size: 11px; color: var(--cc-skin-ink-3, rgba(255,255,255,0.4));';
             statLabel.textContent = label;
             const statValue = document.createElement('div');
-            statValue.style.cssText = `font-size: 14px; font-weight: 600; color: ${highlight ? '#38bdf8' : '#fff'}; font-family: 'SF Mono', monospace;`;
+            statValue.style.cssText = `font-size: 14px; font-weight: 600; color: ${highlight ? 'var(--cc-skin-privacy-link, #38bdf8)' : 'var(--cc-skin-ink, #fff)'}; font-family: 'SF Mono', monospace;`;
             statValue.textContent = value;
             stat.appendChild(statLabel);
             stat.appendChild(statValue);
@@ -6840,7 +6880,7 @@ class CryptoClient {
             const txLink = document.createElement('a');
             txLink.href = `https://solscan.io/tx/${result.depositTxHash}`;
             txLink.target = '_blank';
-            txLink.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #38bdf8; text-decoration: none; margin-top: 10px;';
+            txLink.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--cc-skin-privacy-link, #38bdf8); text-decoration: none; margin-top: 10px;';
             txLink.innerHTML = `<span>View deposit tx</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/></svg>`;
             depositSection.appendChild(txLink);
         }
@@ -6849,13 +6889,13 @@ class CryptoClient {
 
         // Recipients Section
         const recipientsSection = document.createElement('div');
-        recipientsSection.style.cssText = 'background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; padding: 14px; margin-bottom: 12px; text-align: left;';
+        recipientsSection.style.cssText = 'background: var(--cc-skin-panel, rgba(255,255,255,0.03)); border: 1px solid var(--cc-skin-hairline, rgba(255,255,255,0.06)); border-radius: 12px; padding: 14px; margin-bottom: 12px; text-align: left;';
 
         const recipientsHeader = document.createElement('div');
         recipientsHeader.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;';
 
         const recipientsLabel = document.createElement('div');
-        recipientsLabel.style.cssText = 'font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: rgba(255,255,255,0.4);';
+        recipientsLabel.style.cssText = 'font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--cc-skin-ink-3, rgba(255,255,255,0.4));';
         recipientsLabel.textContent = 'Recipients';
 
         const recipientsCount = document.createElement('div');
@@ -6873,17 +6913,17 @@ class CryptoClient {
 
             result.results.slice(0, 5).forEach((r, i) => {
                 const row = document.createElement('div');
-                row.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: rgba(255,255,255,0.02); border-radius: 8px;';
+                row.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: var(--cc-skin-panel-2, rgba(255,255,255,0.02)); border-radius: 8px;';
 
                 const left = document.createElement('div');
                 left.style.cssText = 'display: flex; align-items: center; gap: 8px;';
 
                 const addr = document.createElement('span');
-                addr.style.cssText = 'font-size: 12px; color: rgba(255,255,255,0.7); font-family: "SF Mono", monospace;';
+                addr.style.cssText = 'font-size: 12px; color: var(--cc-skin-ink-2, rgba(255,255,255,0.7)); font-family: "SF Mono", monospace;';
                 addr.textContent = r.address ? r.address.slice(0, 4) + '...' + r.address.slice(-4) : 'Unknown';
 
                 const amount = document.createElement('span');
-                amount.style.cssText = 'font-size: 12px; font-weight: 600; color: #fff;';
+                amount.style.cssText = 'font-size: 12px; font-weight: 600; color: var(--cc-skin-ink, #fff);';
                 amount.textContent = (r.amount || 0).toFixed(4) + ' SOL';
 
                 left.appendChild(addr);
@@ -6900,7 +6940,7 @@ class CryptoClient {
 
             if (result.results.length > 5) {
                 const more = document.createElement('div');
-                more.style.cssText = 'text-align: center; font-size: 11px; color: rgba(255,255,255,0.4); padding: 4px;';
+                more.style.cssText = 'text-align: center; font-size: 11px; color: var(--cc-skin-ink-3, rgba(255,255,255,0.4)); padding: 4px;';
                 more.textContent = `+${result.results.length - 5} more`;
                 recipientsList.appendChild(more);
             }
@@ -6913,7 +6953,7 @@ class CryptoClient {
         // Execution time
         if (result.executionTime) {
             const timeEl = document.createElement('div');
-            timeEl.style.cssText = 'font-size: 11px; color: rgba(255,255,255,0.4); margin-bottom: 16px;';
+            timeEl.style.cssText = 'font-size: 11px; color: var(--cc-skin-ink-3, rgba(255,255,255,0.4)); margin-bottom: 16px;';
             timeEl.textContent = `Completed in ${(result.executionTime / 1000).toFixed(1)}s`;
             modal.appendChild(timeEl);
         }
@@ -6979,13 +7019,13 @@ class CryptoClient {
 
         // Title
         const titleEl = document.createElement('h3');
-        titleEl.style.cssText = 'color: #fff; margin: 0 0 8px 0; font-size: 20px;';
+        titleEl.style.cssText = 'color: var(--cc-skin-ink, #fff); margin: 0 0 8px 0; font-size: 20px;';
         titleEl.textContent = title;
         modal.appendChild(titleEl);
 
         // Message
         const messageEl = document.createElement('p');
-        messageEl.style.cssText = 'color: rgba(255,255,255,0.6); font-size: 14px; margin: 0 0 16px 0;';
+        messageEl.style.cssText = 'color: var(--cc-skin-ink-2, rgba(255,255,255,0.6)); font-size: 14px; margin: 0 0 16px 0;';
         messageEl.textContent = message;
         modal.appendChild(messageEl);
 
@@ -6995,7 +7035,7 @@ class CryptoClient {
             detailsBox.style.cssText = 'background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); border-radius: 10px; padding: 12px; margin-bottom: 16px; text-align: left;';
 
             const detailText = document.createElement('p');
-            detailText.style.cssText = 'color: rgba(255,255,255,0.7); font-size: 11px; font-family: "SF Mono", monospace; margin: 0; word-break: break-all;';
+            detailText.style.cssText = 'color: var(--cc-skin-ink-2, rgba(255,255,255,0.7)); font-size: 11px; font-family: "SF Mono", monospace; margin: 0; word-break: break-all;';
             detailText.textContent = errorDetails;
             detailsBox.appendChild(detailText);
             modal.appendChild(detailsBox);
@@ -7003,7 +7043,7 @@ class CryptoClient {
 
         // Close button
         const closeBtn = document.createElement('button');
-        closeBtn.style.cssText = 'width: 100%; padding: 14px; border-radius: 12px; border: none; background: rgba(255,255,255,0.1); color: #fff; cursor: pointer; font-weight: 600; font-size: 14px;';
+        closeBtn.style.cssText = 'width: 100%; padding: 14px; border-radius: 12px; border: none; background: var(--cc-skin-btn, rgba(255,255,255,0.1)); color: var(--cc-skin-ink, #fff); cursor: pointer; font-weight: 600; font-size: 14px;';
         closeBtn.textContent = 'Close';
         closeBtn.addEventListener('click', () => overlay.remove());
         modal.appendChild(closeBtn);
