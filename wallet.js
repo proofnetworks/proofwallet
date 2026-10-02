@@ -955,6 +955,8 @@ class CryptoClient {
             onVerify: config.onVerify || null,
             // Mount point for the connect button (selector string or element)
             mountTo: config.mountTo || null,
+            // Bulk Transfer / Bulk Buy entry points (connected view + burner manager); false hides them
+            bulkTools: config.bulkTools !== false,
             // Overlay look: 'privy' (default) or 'classic' (the original dark sheet)
             skin: config.skin || 'privy',
             // Logo above "Connect Wallet" (privy skin)
@@ -6076,8 +6078,8 @@ class CryptoClient {
         );
         quickActions.appendChild(burnerAction);
 
-        // Bulk Transfer action (only if burner wallets exist)
-        if (burnerWallets.length > 0) {
+        // Bulk Transfer action (only if burner wallets exist and the project enables bulk tools)
+        if (burnerWallets.length > 0 && this.config.bulkTools) {
             const transferAction = this.createQuickActionButton(
                 'transfer',
                 '↗',
@@ -6678,8 +6680,8 @@ class CryptoClient {
 
         container.appendChild(actionsContainer);
 
-        // Bulk Buy button (only show if there are wallets)
-        if (wallets.length > 0) {
+        // Bulk Buy button (only if there are wallets and the project enables bulk tools)
+        if (wallets.length > 0 && this.config.bulkTools) {
             const bulkBuyBtn = document.createElement('button');
             bulkBuyBtn.className = 'cc-bulk-buy-btn';
 

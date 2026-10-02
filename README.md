@@ -72,6 +72,7 @@ new CryptoClient({
   mountTo:         string | Element, // CSS selector / DOM node for the auto-rendered Connect button
   onVerify:        async (publicKey) => boolean, // Optional connection gate — return false to refuse
   skin:            'privy' | 'classic', // Overlay look — default: 'privy'
+  bulkTools:       boolean,     // Show Bulk Transfer / Bulk Buy (connected view + burner manager) — default: true
   icon:            string,      // Logo URL shown above "Connect Wallet" (privy skin)
   brand:           string | false, // Footer "Protected by <brand>" — default: 'ProofNetwork'; false hides it
   theme: {
