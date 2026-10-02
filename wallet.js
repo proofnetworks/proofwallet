@@ -3287,6 +3287,24 @@ class CryptoClient {
             /* ─────────────────────────────────────────────────────────────
                Toasts & Notifications
             ───────────────────────────────────────────────────────────── */
+            /* a trigger whose sheet is still loading (see _beginSheetOpen) */
+            .cc-is-loading { position: relative; pointer-events: none; cursor: progress; }
+            .cc-is-loading .cc-quick-action-arrow { visibility: hidden; }
+            .cc-loading-spin {
+                position: absolute;
+                top: 50%;
+                right: 14px;
+                width: 16px;
+                height: 16px;
+                margin-top: -8px;
+                border: 2px solid currentColor;
+                border-right-color: transparent;
+                border-radius: 50%;
+                opacity: 0.55;
+                animation: cc-loading-spin 0.7s linear infinite;
+            }
+            .cc-burner-action .cc-loading-spin { top: 8px; right: 8px; width: 12px; height: 12px; margin-top: 0; }
+            @keyframes cc-loading-spin { to { transform: rotate(360deg); } }
             .cc-burner-copied {
                 position: fixed;
                 bottom: 24px;
@@ -6085,7 +6103,7 @@ class CryptoClient {
                 '↗',
                 'Bulk Transfer',
                 'Send SOL to multiple wallets',
-                () => this.showBulkTransferFromConnected()
+                (e) => this.showBulkTransferFromConnected(e && e.currentTarget)
             );
             quickActions.appendChild(transferAction);
 
@@ -6095,7 +6113,7 @@ class CryptoClient {
                 '⚡',
                 'Bulk Buy',
                 'Buy tokens with burner wallets',
-                () => this.showBulkBuyFromConnected()
+                (e) => this.showBulkBuyFromConnected(e && e.currentTarget)
             );
             quickActions.appendChild(swapAction);
         }
@@ -6223,7 +6241,7 @@ class CryptoClient {
     /**
      * Show bulk transfer modal from connected state
      */
-    showBulkTransferFromConnected() {
+    showBulkTransferFromConnected(trigger) {
         // Find a burner wallet with balance to use as source
         const burnerWallets = CryptoClient.getBurnerWallets();
         if (burnerWallets.length === 0) {
@@ -6236,16 +6254,16 @@ class CryptoClient {
 
         // Transfer modal creates its own overlay with higher z-index
         // so the wallet modal stays visible underneath
-        this.showTransferModal(sourceWallet);
+        this.showTransferModal(sourceWallet, trigger);
     }
 
     /**
      * Show bulk buy modal from connected state
      */
-    showBulkBuyFromConnected() {
+    showBulkBuyFromConnected(trigger) {
         // Bulk buy modal creates its own overlay with higher z-index
         // so the wallet modal stays visible underneath
-        this.showBulkSwapModal();
+        this.showBulkSwapModal(trigger);
     }
 
     /**
@@ -6490,9 +6508,10 @@ class CryptoClient {
                     renameInput.select();
                 }));
 
-                actionsPanel.appendChild(createAction('transfer', '↗', 'Send', () => {
-                    this.showTransferModal(wallet);
-                }));
+                const sendBtn = createAction('transfer', '↗', 'Send', () => {
+                    this.showTransferModal(wallet, sendBtn);
+                });
+                actionsPanel.appendChild(sendBtn);
 
                 actionsPanel.appendChild(createAction('export', '🔑', 'Export', () => {
                     this.exportBurnerPrivateKey(wallet);
@@ -6719,8 +6738,8 @@ class CryptoClient {
             bulkBuyBtn.appendChild(btnIcon);
             bulkBuyBtn.appendChild(btnText);
 
-            bulkBuyBtn.addEventListener('click', () => {
-                this.showBulkSwapModal();
+            bulkBuyBtn.addEventListener('click', (e) => {
+                this.showBulkSwapModal(e.currentTarget);
             });
             container.appendChild(bulkBuyBtn);
         }
@@ -7513,7 +7532,49 @@ class CryptoClient {
     /**
      * Show transfer modal for a burner wallet (supports multiple recipients)
      */
-    async showTransferModal(fromWallet) {
+    /**
+     * Guard for sheets that fetch before they render (transfer, bulk buy):
+     * ignore a second open while one is loading or already on screen, and show
+     * a spinner on the clicked button so a slow fetch isn't mistaken for a dead
+     * click (repeat clicks used to queue one sheet each).
+     * @returns {boolean} false when this open should be skipped
+     */
+    _beginSheetOpen(key, trigger) {
+        this._sheetOpening = this._sheetOpening || {};
+        if (this._sheetOpening[key] || document.querySelector(`[data-cc-sheet="${key}"]`)) return false;
+        this._sheetOpening[key] = true;
+        if (trigger && trigger.classList) {
+            trigger.classList.add('cc-is-loading');
+            trigger.setAttribute('aria-busy', 'true');
+            if (!trigger.querySelector('.cc-loading-spin')) {
+                const spin = document.createElement('span');
+                spin.className = 'cc-loading-spin';
+                spin.setAttribute('aria-hidden', 'true');
+                trigger.appendChild(spin);
+            }
+        }
+        return true;
+    }
+
+    _endSheetOpen(key, trigger) {
+        if (this._sheetOpening) this._sheetOpening[key] = false;
+        if (trigger && trigger.classList) {
+            trigger.classList.remove('cc-is-loading');
+            trigger.removeAttribute('aria-busy');
+            trigger.querySelectorAll('.cc-loading-spin').forEach(n => n.remove());
+        }
+    }
+
+    async showTransferModal(fromWallet, trigger) {
+        if (!this._beginSheetOpen('transfer', trigger)) return;
+        try {
+            await this._showTransferModal(fromWallet);
+        } finally {
+            this._endSheetOpen('transfer', trigger);
+        }
+    }
+
+    async _showTransferModal(fromWallet) {
         const web3 = window.solanaWeb3;
         if (!web3) {
             this.showErrorToast('Solana Web3 not loaded');
@@ -7544,6 +7605,7 @@ class CryptoClient {
         // Create modal overlay
         const overlay = document.createElement('div');
         overlay.className = 'cc-modal-backdrop';
+        overlay.dataset.ccSheet = 'transfer';
         overlay.style.zIndex = '100001';
 
         // Create bottom sheet modal
@@ -8250,7 +8312,16 @@ class CryptoClient {
     /**
      * Show bulk swap modal to buy tokens across multiple burner wallets
      */
-    async showBulkSwapModal() {
+    async showBulkSwapModal(trigger) {
+        if (!this._beginSheetOpen('bulkbuy', trigger)) return;
+        try {
+            await this._showBulkSwapModal();
+        } finally {
+            this._endSheetOpen('bulkbuy', trigger);
+        }
+    }
+
+    async _showBulkSwapModal() {
         const web3 = window.solanaWeb3;
         if (!web3) {
             this.showErrorToast('Solana Web3 not loaded');
@@ -8289,6 +8360,7 @@ class CryptoClient {
         // Create modal overlay
         const overlay = document.createElement('div');
         overlay.className = 'cc-modal-backdrop';
+        overlay.dataset.ccSheet = 'bulkbuy';
         overlay.style.zIndex = '100001';
 
         // Create bottom sheet modal
