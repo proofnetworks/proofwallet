@@ -4654,53 +4654,6 @@ class CryptoClient {
               .cc-skin-badge { margin: 12px -16px 0; }
             }
 
-            /* ── "current wallet" strip (top of the burner manager) ───────────────────── */
-            .cc-skin-current {
-              display: flex;
-              align-items: center;
-              gap: 10px;
-              margin: 0 0 12px;
-              padding: 10px 12px;
-              background: #f7f7f9;
-              border-radius: 12px;
-            }
-            .cc-skin-current-dot {
-              flex-shrink: 0;
-              width: 8px; height: 8px;
-              border-radius: 50%;
-              background: #12b76a;
-              box-shadow: 0 0 0 3px rgba(18, 183, 106, 0.15);
-            }
-            .cc-skin-current-info {
-              flex: 1;
-              min-width: 0;
-              display: flex;
-              align-items: baseline;
-              gap: 8px;
-            }
-            .cc-skin-current-info b {
-              font-size: 13.5px;
-              font-weight: 600;
-              letter-spacing: -0.005em;
-              color: #101828;
-              white-space: nowrap;
-              overflow: hidden;
-              text-overflow: ellipsis;
-            }
-            .cc-skin-current-info span {
-              font-family: var(--cc-skin-mono);
-              font-size: 11.5px;
-              color: #667085;
-            }
-            .cc-skin-current-tag {
-              flex-shrink: 0;
-              padding: 3px 8px;
-              font-size: 10.5px;
-              font-weight: 600;
-              border-radius: 999px;
-              background: rgba(18, 183, 106, 0.12);
-              color: #027a48;
-            }
             /* ── DARK theme ──────────────────────────────────────────────────────────
                Built on surface tokens, not translucent white over a gradient:
                  dialog   = --cc-skin-dark-hi → -lo (a barely-there vertical falloff)
@@ -4868,13 +4821,6 @@ class CryptoClient {
               border-color: var(--cc-skin-dk-divider);
               color: var(--cc-skin-dk-ink-3);
             }
-            html[data-cc-wallet-theme="dark"] .cc-skin-current {
-              background: var(--cc-skin-dk-raised);
-              box-shadow: var(--cc-skin-dk-edge), 0 0 0 1px var(--cc-skin-dk-line);
-            }
-            html[data-cc-wallet-theme="dark"] .cc-skin-current-info b { color: var(--cc-skin-dk-ink); }
-            html[data-cc-wallet-theme="dark"] .cc-skin-current-info span { color: var(--cc-skin-dk-ink-2); }
-            html[data-cc-wallet-theme="dark"] .cc-skin-current-tag { background: rgba(18, 183, 106, 0.14); color: #3ccb7f; }
 
             /* footer, connect interstitial, grabber */
             html[data-cc-wallet-theme="dark"] .cc-skin-badge {
@@ -5191,6 +5137,322 @@ class CryptoClient {
             html[data-cc-wallet-theme="dark"] .cc-modal-backdrop:not(#cc-wallet-modal) > .cc-modal:not(.cc-privacy-success-modal) {
                 background: linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo));
             }
+
+            /* ══ UX layer (privy skin) ════════════════════════════════════════════
+               Every view gets a title row aligned with the close circle, rows say
+               what clicking them does, state is shown where it lives. */
+
+            /* views ease in when they switch */
+            @keyframes cc-skin-in { from { opacity: 0; transform: translateY(6px); } }
+            html[data-cc-wallet-theme] #cc-wallet-modal #cc-wallet-list,
+            html[data-cc-wallet-theme] #cc-wallet-modal #cc-connected-view,
+            html[data-cc-wallet-theme] #cc-wallet-modal #cc-burner-view.visible {
+              animation: cc-skin-in 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+            }
+
+            /* keyboard focus, both themes */
+            html[data-cc-wallet-theme] #cc-wallet-modal button:focus-visible,
+            html[data-cc-wallet-theme] #cc-wallet-modal a:focus-visible,
+            html[data-cc-wallet-theme] #cc-header-btn:focus-visible {
+              outline: none;
+              box-shadow: 0 0 0 3px color-mix(in srgb, var(--cc-accent) 30%, transparent);
+            }
+
+            /* title rows sit on the close circle's line instead of under an empty band */
+            html[data-cc-wallet-theme] #cc-wallet-modal #cc-connected-view,
+            html[data-cc-wallet-theme] #cc-wallet-modal #cc-burner-view { padding-top: 0; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-viewtitle {
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              min-height: 28px;
+              margin: -10px 40px 14px;
+              font-size: 15px;
+              font-weight: 600;
+              letter-spacing: -0.01em;
+              color: var(--cc-text-primary);
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-header { min-height: 28px; margin: -10px 0 14px; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-title { font-size: 15px; }
+
+            /* ── connect: ready wallets first, then "More wallets" ── */
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-section {
+              margin: 8px 2px -2px;
+              font-size: 11.5px;
+              font-weight: 600;
+              letter-spacing: 0.02em;
+              color: var(--cc-text-tertiary);
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-wallet-btn.not-installed {
+              min-height: 46px;
+              opacity: 1;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-wallet-btn.not-installed .cc-wallet-icon { opacity: 0.8; width: 24px; height: 24px; margin: 0 2px; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-wallet-btn.not-installed .cc-wallet-name { color: var(--cc-text-secondary); font-size: 14px; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-wallet-btn.not-installed .cc-wallet-status { display: none; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-get {
+              margin-left: auto;
+              display: inline-flex;
+              align-items: center;
+              gap: 4px;
+              padding: 4px 10px;
+              border-radius: 999px;
+              background: var(--cc-bg-elevated);
+              color: var(--cc-text-secondary);
+              font-size: 12px;
+              font-weight: 600;
+              transition: background 0.15s ease, color 0.15s ease;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-get::after {
+              content: '';
+              width: 10px; height: 10px;
+              background: currentColor;
+              -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5H9z'/%3E%3C/svg%3E") center / contain no-repeat;
+              mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5H9z'/%3E%3C/svg%3E") center / contain no-repeat;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-wallet-btn:hover .cc-skin-get {
+              background: color-mix(in srgb, var(--cc-accent) 14%, transparent);
+              color: var(--cc-text-primary);
+            }
+            html[data-cc-wallet-theme="light"] #cc-wallet-modal .cc-last-used-badge {
+              background: color-mix(in srgb, var(--cc-accent) 12%, transparent);
+              color: color-mix(in srgb, var(--cc-accent) 70%, #000);
+            }
+
+            /* ── connected: identity + balance card ── */
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-connected-wallet-info {
+              flex-wrap: wrap;
+              row-gap: 0;
+              padding: 14px;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-connected-wallet-address {
+              display: inline-flex;
+              align-items: center;
+              gap: 4px;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-copy {
+              display: inline-grid;
+              place-items: center;
+              width: 22px; height: 22px;
+              padding: 0;
+              border: 0;
+              border-radius: 6px;
+              background: transparent;
+              color: var(--cc-text-tertiary);
+              cursor: pointer;
+              transition: background 0.15s ease, color 0.15s ease;
+              --cc-skin-copy-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z'/%3E%3C/svg%3E");
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-copy::before {
+              content: '';
+              width: 13px; height: 13px;
+              background: currentColor;
+              -webkit-mask: var(--cc-skin-copy-glyph) center / contain no-repeat;
+              mask: var(--cc-skin-copy-glyph) center / contain no-repeat;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-copy:hover { background: var(--cc-bg-elevated); color: var(--cc-text-primary); }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-copy.is-copied {
+              color: #12b76a;
+              --cc-skin-copy-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'/%3E%3C/svg%3E");
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-balance {
+              flex-basis: 100%;
+              display: grid;
+              grid-template-columns: 1fr auto;
+              align-items: center;
+              row-gap: 2px;
+              margin-top: 12px;
+              padding-top: 12px;
+              border-top: 1px solid var(--cc-skin-hairline);
+              text-align: left;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-balance-label { grid-row: 1; font-size: 12px; color: var(--cc-text-tertiary); }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-balance-amount {
+              grid-row: 2;
+              display: flex;
+              align-items: baseline;
+              gap: 5px;
+              font-size: 22px;
+              font-weight: 650;
+              letter-spacing: -0.02em;
+              font-variant-numeric: tabular-nums;
+              color: var(--cc-text-primary);
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-balance-amount small { font-size: 13px; font-weight: 600; color: var(--cc-text-secondary); letter-spacing: 0; }
+            @keyframes cc-skin-shimmer { to { background-position: -200% 0; } }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-balance-value.is-loading {
+              color: transparent;
+              border-radius: 6px;
+              background: linear-gradient(90deg, var(--cc-bg-elevated) 0%, var(--cc-border) 50%, var(--cc-bg-elevated) 100%) 0 0 / 200% 100%;
+              animation: cc-skin-shimmer 1.2s linear infinite;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-explorer {
+              grid-row: 1 / span 2;
+              grid-column: 2;
+              display: inline-flex;
+              align-items: center;
+              gap: 5px;
+              padding: 7px 11px;
+              border-radius: 9px;
+              background: var(--cc-bg-elevated);
+              color: var(--cc-text-secondary);
+              font-size: 12.5px;
+              font-weight: 600;
+              text-decoration: none;
+              transition: background 0.15s ease, color 0.15s ease;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-explorer::after {
+              content: '';
+              width: 10px; height: 10px;
+              background: currentColor;
+              -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5H9z'/%3E%3C/svg%3E") center / contain no-repeat;
+              mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5H9z'/%3E%3C/svg%3E") center / contain no-repeat;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-explorer:hover { background: var(--cc-border); color: var(--cc-text-primary); }
+
+            /* connected footer: two quiet buttons side by side — the actions above are the content */
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-connected-footer { flex-direction: row; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-switch-wallet-btn,
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-disconnect-btn-small { flex: 1; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-switch-wallet-btn {
+              background: transparent;
+              border: 1px solid var(--cc-border);
+              color: var(--cc-text-primary);
+              box-shadow: none;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-switch-wallet-btn:hover {
+              background: var(--cc-bg-secondary);
+              border-color: var(--cc-border-hover);
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-disconnect-btn-small { background: transparent; }
+
+            /* ── burner manager: Use / Active, icon "more", inline delete confirm ── */
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-item-header { gap: 6px; cursor: pointer; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-use {
+              flex-shrink: 0;
+              height: 30px;
+              padding: 0 13px;
+              border: 1px solid var(--cc-border);
+              border-radius: 8px;
+              background: var(--cc-skin-row, #ffffff);
+              color: var(--cc-text-primary);
+              font-size: 12px;
+              font-weight: 600;
+              cursor: pointer;
+              transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-item-header:hover .cc-skin-use {
+              background: var(--cc-accent);
+              border-color: var(--cc-accent);
+              color: var(--cc-skin-accent-ink);
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-active-tag {
+              flex-shrink: 0;
+              display: inline-flex;
+              align-items: center;
+              gap: 5px;
+              height: 30px;
+              padding: 0 10px;
+              border-radius: 8px;
+              background: rgba(18, 183, 106, 0.12);
+              color: #027a48;
+              font-size: 12px;
+              font-weight: 600;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-skin-active-tag::before {
+              content: '';
+              width: 12px; height: 12px;
+              background: currentColor;
+              -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'/%3E%3C/svg%3E") center / contain no-repeat;
+              mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'/%3E%3C/svg%3E") center / contain no-repeat;
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-skin-active-tag { background: rgba(18, 183, 106, 0.14); color: #3ccb7f; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-item-wrapper.active { box-shadow: inset 3px 0 0 #12b76a; }
+            /* options toggle → a compact "more" button; the actions panel says what's inside */
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-options-toggle { width: 30px; padding: 0; justify-content: center; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-options-toggle::before,
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-options-toggle.open::before { content: none; }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-options-toggle::after {
+              width: 15px; height: 15px;
+              -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='5' cy='12' r='2'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Ccircle cx='19' cy='12' r='2'/%3E%3C/svg%3E") center / contain no-repeat;
+              mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='5' cy='12' r='2'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Ccircle cx='19' cy='12' r='2'/%3E%3C/svg%3E") center / contain no-repeat;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-options-toggle.open::after {
+              transform: none;
+              -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z'/%3E%3C/svg%3E") center / contain no-repeat;
+              mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z'/%3E%3C/svg%3E") center / contain no-repeat;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-action.delete.is-confirming {
+              background: #f04438;
+              border-color: #f04438;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-action.delete.is-confirming .cc-burner-action-icon,
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-action.delete.is-confirming .cc-burner-action-label { color: #ffffff; }
+
+            /* New wallet / Import key with glyphs */
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-generate,
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-import {
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              gap: 7px;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-generate::before,
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-import::before {
+              content: '';
+              width: 14px; height: 14px;
+              background: currentColor;
+              -webkit-mask: var(--cc-skin-btn-glyph) center / contain no-repeat;
+              mask: var(--cc-skin-btn-glyph) center / contain no-repeat;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-generate { --cc-skin-btn-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z'/%3E%3C/svg%3E"); }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-import { --cc-skin-btn-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M21 10h-8.35A5.99 5.99 0 0 0 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6a5.99 5.99 0 0 0 5.65-4H13l2 2 2-2 2 2 2.35-2.35L21 10zM7 15c-1.65 0-3-1.35-3-3s1.35-3 3-3 3 1.35 3 3-1.35 3-3 3z'/%3E%3C/svg%3E"); }
+
+            /* storage note with an info glyph */
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-warning {
+              display: flex;
+              align-items: flex-start;
+              gap: 8px;
+              text-align: left;
+            }
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-burner-warning::before {
+              content: '';
+              flex-shrink: 0;
+              width: 14px; height: 14px;
+              margin-top: 1px;
+              background: currentColor;
+              opacity: 0.8;
+              -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z'/%3E%3C/svg%3E") center / contain no-repeat;
+              mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z'/%3E%3C/svg%3E") center / contain no-repeat;
+            }
+
+            /* toasts: a compact pill with a check */
+            html[data-cc-wallet-theme] .cc-burner-copied {
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              padding: 10px 16px 10px 13px;
+              border: 0;
+              border-radius: 999px;
+              background: #101828;
+              color: #ffffff;
+              font-family: var(--cc-skin-font);
+              font-size: 13px;
+              font-weight: 500;
+              box-shadow: 0 10px 30px -6px rgba(16, 24, 40, 0.35);
+            }
+            html[data-cc-wallet-theme] .cc-burner-copied::before {
+              content: '';
+              width: 15px; height: 15px;
+              background: #32d583;
+              -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'/%3E%3C/svg%3E") center / contain no-repeat;
+              mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'/%3E%3C/svg%3E") center / contain no-repeat;
+            }
+            html[data-cc-wallet-theme="dark"] .cc-burner-copied {
+              background: var(--cc-skin-dk-hover);
+              color: var(--cc-skin-dk-ink);
+              box-shadow: inset 0 0 0 1px var(--cc-skin-dk-line-strong), 0 10px 30px -6px rgba(0, 0, 0, 0.6);
+            }
         `;
         document.head.appendChild(styles);
 
@@ -5280,42 +5542,7 @@ class CryptoClient {
             modal.appendChild(badge);
         }
 
-        // 4. "current wallet" strip at the top of the burner manager. The burner
-        //    view is rebuilt with replaceChildren() on every open, so re-insert
-        //    after each render.
-        const burnerView = document.getElementById('cc-burner-view');
-        const shortAddr = (a) => (a && a.length > 10 ? a.slice(0, 4) + '…' + a.slice(-4) : a || '');
-        const insertCurrent = () => {
-            if (!burnerView || burnerView.querySelector('.cc-skin-current')) return;
-            const bh = burnerView.querySelector('.cc-burner-header');
-            if (!bh) return;
-            const st = this.state || {};
-            if (!st.isConnected || !st.walletAddress) return;
-            let name;
-            if (st.activeWallet === 'burner') {
-                const w = CryptoClient.getBurnerWallets().find((x) => x.publicKey === st.walletAddress);
-                name = (w && w.name) || 'Burner Wallet';
-            } else {
-                name = (CryptoClient.WALLETS[st.activeWallet] && CryptoClient.WALLETS[st.activeWallet].name) || 'Wallet';
-            }
-            const strip = el('div', 'cc-skin-current', 'wallet-current');
-            const info = el('div', 'cc-skin-current-info');
-            const nm = document.createElement('b');
-            nm.textContent = name;
-            const ad = document.createElement('span');
-            ad.textContent = shortAddr(st.walletAddress);
-            info.append(nm, ad);
-            const tag = el('span', 'cc-skin-current-tag');
-            tag.textContent = 'Current';
-            strip.append(el('span', 'cc-skin-current-dot'), info, tag);
-            bh.insertAdjacentElement('afterend', strip);
-        };
-        if (burnerView) {
-            new MutationObserver(insertCurrent).observe(burnerView, { childList: true });
-            insertCurrent();
-        }
-
-        // 5. connect interstitial: spinner → green check + "Connected to <wallet>".
+        // 4. connect interstitial: spinner → green check + "Connected to <wallet>".
         //    onConnectSuccess writes "Connecting to X..." / "Connected!" into
         //    #cc-status and hides the overlay ~600ms later with no feedback, so
         //    this keys off the status text and holds the overlay open until the
@@ -5609,10 +5836,22 @@ class CryptoClient {
         container.replaceChildren();
 
         let wallets = this.detectWallets();
+        const privy = this.config.skin === 'privy';
 
         // Show all wallets - burner selection happens at launch time if needed
+        // Privy skin: ready-to-use wallets first, the rest under "More wallets"
+        if (privy) wallets = wallets.filter(w => w.installed).concat(wallets.filter(w => !w.installed));
+        let moreLabelShown = false;
 
         wallets.forEach(wallet => {
+            if (privy && !wallet.installed && !moreLabelShown) {
+                const more = document.createElement('div');
+                more.className = 'cc-skin-section';
+                more.setAttribute('data-component', 'wallet-more-label');
+                more.textContent = 'More wallets';
+                container.appendChild(more);
+                moreLabelShown = true;
+            }
             const btn = document.createElement('button');
             btn.className = 'cc-wallet-btn';
             if (wallet.isLastUsed) btn.classList.add('last-used');
@@ -5640,7 +5879,9 @@ class CryptoClient {
             // Custom status text for burner wallets
             if (wallet.id === 'burner') {
                 const burnerCount = CryptoClient.getBurnerWallets().length;
-                status.textContent = burnerCount > 0 ? `${burnerCount} wallet${burnerCount > 1 ? 's' : ''} saved` : 'Create local wallets';
+                status.textContent = burnerCount > 0
+                    ? `${burnerCount} wallet${burnerCount > 1 ? 's' : ''} saved`
+                    : (privy ? 'Instant, no extension needed' : 'Create local wallets');
             } else {
                 status.textContent = wallet.installed ? 'Detected' : 'Not installed';
             }
@@ -5659,11 +5900,19 @@ class CryptoClient {
                 btn.appendChild(badge);
             }
 
-            // Arrow
-            const arrow = document.createElement('span');
-            arrow.className = 'cc-wallet-arrow';
-            arrow.textContent = '›';
-            btn.appendChild(arrow);
+            // Arrow (privy skin: an explicit "Install" pill for wallets that aren't installed)
+            if (privy && !wallet.installed) {
+                const get = document.createElement('span');
+                get.className = 'cc-skin-get';
+                get.textContent = 'Install';
+                btn.appendChild(get);
+                btn.title = `Install ${wallet.name} (opens ${wallet.downloadUrl})`;
+            } else {
+                const arrow = document.createElement('span');
+                arrow.className = 'cc-wallet-arrow';
+                arrow.textContent = '›';
+                btn.appendChild(arrow);
+            }
 
             // Click handler
             btn.addEventListener('click', () => {
@@ -5695,6 +5944,15 @@ class CryptoClient {
 
         const walletConfig = CryptoClient.WALLETS[this.state.activeWallet];
         const burnerWallets = CryptoClient.getBurnerWallets();
+        const privy = this.config.skin === 'privy';
+
+        if (privy) {
+            const viewTitle = document.createElement('div');
+            viewTitle.className = 'cc-skin-viewtitle';
+            viewTitle.setAttribute('data-component', 'wallet-view-title');
+            viewTitle.textContent = 'Your wallet';
+            container.appendChild(viewTitle);
+        }
 
         // Wallet info section
         const walletInfo = document.createElement('div');
@@ -5726,6 +5984,13 @@ class CryptoClient {
             ? this.state.walletAddress.slice(0, 8) + '...' + this.state.walletAddress.slice(-6)
             : '';
 
+        if (privy && this.state.walletAddress) {
+            const addr = this.state.walletAddress;
+            walletAddress.textContent = addr.slice(0, 4) + '\u2026' + addr.slice(-4);
+            walletAddress.title = addr;
+            walletAddress.appendChild(this.createSkinCopyButton(addr));
+        }
+
         walletDetails.appendChild(walletName);
         walletDetails.appendChild(walletAddress);
 
@@ -5735,6 +6000,34 @@ class CryptoClient {
         walletInfo.appendChild(walletIcon);
         walletInfo.appendChild(walletDetails);
         walletInfo.appendChild(connectedDot);
+
+        if (privy && this.state.walletAddress) {
+            const addr = this.state.walletAddress;
+            const balanceRow = document.createElement('div');
+            balanceRow.className = 'cc-skin-balance';
+            balanceRow.setAttribute('data-component', 'wallet-balance');
+            const balanceLabel = document.createElement('span');
+            balanceLabel.className = 'cc-skin-balance-label';
+            balanceLabel.textContent = 'Balance';
+            const balanceValue = document.createElement('span');
+            balanceValue.className = 'cc-skin-balance-value is-loading';
+            balanceValue.textContent = '0.0000';
+            const unit = document.createElement('small');
+            unit.textContent = 'SOL';
+            const explorer = document.createElement('a');
+            explorer.className = 'cc-skin-explorer';
+            explorer.href = `https://solscan.io/account/${addr}`;
+            explorer.target = '_blank';
+            explorer.rel = 'noopener';
+            explorer.textContent = 'Solscan';
+            explorer.setAttribute('aria-label', 'View this wallet on Solscan');
+            const amount = document.createElement('span');
+            amount.className = 'cc-skin-balance-amount';
+            amount.append(balanceValue, unit);
+            balanceRow.append(balanceLabel, amount, explorer);
+            walletInfo.appendChild(balanceRow);
+            this.loadSkinBalance(addr, balanceValue);
+        }
         container.appendChild(walletInfo);
 
         // Quick actions section
@@ -5792,6 +6085,51 @@ class CryptoClient {
         footer.appendChild(switchBtn);
         footer.appendChild(disconnectBtn);
         container.appendChild(footer);
+    }
+
+    /**
+     * Privy skin: a small copy button that confirms in place (icon → check).
+     */
+    createSkinCopyButton(text) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'cc-skin-copy';
+        btn.setAttribute('data-component', 'wallet-copy-address');
+        btn.setAttribute('aria-label', 'Copy address');
+        btn.title = 'Copy address';
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(text).then(() => {
+                btn.classList.add('is-copied');
+                btn.setAttribute('aria-label', 'Copied');
+                clearTimeout(btn._t);
+                btn._t = setTimeout(() => {
+                    btn.classList.remove('is-copied');
+                    btn.setAttribute('aria-label', 'Copy address');
+                }, 1400);
+            }).catch(() => this.showErrorToast('Could not copy the address'));
+        });
+        return btn;
+    }
+
+    /**
+     * Privy skin: fill a balance element with the wallet's SOL balance (pool-routed).
+     */
+    async loadSkinBalance(address, el) {
+        try {
+            await this.solanaWeb3Ready;
+            const web3 = window.solanaWeb3;
+            if (!web3) throw new Error('web3 not loaded');
+            const [info] = await CryptoClient.batchGetAccountsInfo([new web3.PublicKey(address)]);
+            if (!el.isConnected) return;
+            const sol = (info ? info.lamports : 0) / 1e9;
+            el.textContent = sol.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+        } catch (e) {
+            el.textContent = '\u2014';
+            el.title = 'Balance unavailable right now';
+        } finally {
+            el.classList.remove('is-loading');
+        }
     }
 
     /**
@@ -5961,6 +6299,9 @@ class CryptoClient {
 
         const wallets = CryptoClient.getBurnerWallets();
         const activeBurnerId = CryptoClient.getActiveBurnerId();
+        const privy = this.config.skin === 'privy';
+        // "Active" only means something once a burner is the connected wallet
+        const burnerInUse = this.state.isConnected && this.state.activeWallet === 'burner';
 
         if (wallets.length === 0) {
             const empty = document.createElement('div');
@@ -6065,6 +6406,8 @@ class CryptoClient {
                 toggle.type = 'button';
                 toggle.className = 'cc-burner-options-toggle';
                 toggle.textContent = '∨';
+                toggle.setAttribute('aria-label', 'Wallet options');
+                toggle.title = 'Copy, QR, rename, send, export, delete';
 
                 // Expandable actions panel
                 const actionsPanel = document.createElement('div');
@@ -6121,12 +6464,31 @@ class CryptoClient {
                     this.exportBurnerPrivateKey(wallet);
                 }));
 
-                actionsPanel.appendChild(createAction('delete', '✕', 'Delete', () => {
+                const deleteBtn = createAction('delete', '✕', 'Delete', () => {
+                    if (privy) {
+                        // inline two-step confirm instead of the browser's confirm() popup
+                        if (!deleteBtn.classList.contains('is-confirming')) {
+                            deleteBtn.classList.add('is-confirming');
+                            deleteBtn.querySelector('.cc-burner-action-label').textContent = 'Confirm';
+                            clearTimeout(deleteBtn._t);
+                            deleteBtn._t = setTimeout(() => {
+                                deleteBtn.classList.remove('is-confirming');
+                                deleteBtn.querySelector('.cc-burner-action-label').textContent = 'Delete';
+                            }, 3000);
+                            return;
+                        }
+                        CryptoClient.deleteBurnerWallet(wallet.id);
+                        this.renderBurnerView(fromConnected);
+                        this.showCopiedToast(`Deleted ${wallet.name || 'wallet'}`);
+                        return;
+                    }
                     if (confirm(`Delete "${wallet.name || 'this wallet'}"?`)) {
                         CryptoClient.deleteBurnerWallet(wallet.id);
                         this.renderBurnerView();
                     }
-                }));
+                });
+                if (privy) deleteBtn.title = 'Delete this wallet (click twice). Export the key first if it holds funds.';
+                actionsPanel.appendChild(deleteBtn);
 
                 // Toggle actions panel
                 toggle.onclick = (e) => {
@@ -6157,6 +6519,23 @@ class CryptoClient {
                 };
 
                 header.appendChild(info);
+                if (privy) {
+                    // say what clicking a row does: "Use" it, or show that it already is
+                    if (burnerInUse && wallet.id === activeBurnerId) {
+                        const tag = document.createElement('span');
+                        tag.className = 'cc-skin-active-tag';
+                        tag.textContent = 'Active';
+                        header.appendChild(tag);
+                    } else {
+                        const use = document.createElement('button');
+                        use.type = 'button';
+                        use.className = 'cc-skin-use';
+                        use.textContent = 'Use';
+                        use.setAttribute('aria-label', `Use ${wallet.name || 'this wallet'}`);
+                        header.appendChild(use); // the click bubbles to the row handler
+                        header.title = `Use ${wallet.name || 'this wallet'}`;
+                    }
+                }
                 header.appendChild(toggle);
                 wrapper.appendChild(header);
                 wrapper.appendChild(actionsPanel);
@@ -6235,7 +6614,7 @@ class CryptoClient {
         // Generate new wallet button
         const generateBtn = document.createElement('button');
         generateBtn.className = 'cc-burner-generate';
-        generateBtn.textContent = '+ Generate';
+        generateBtn.textContent = privy ? 'New wallet' : '+ Generate';
         generateBtn.addEventListener('click', () => {
             const newWallet = CryptoClient.generateBurnerWallet();
             if (newWallet) {
@@ -6253,7 +6632,7 @@ class CryptoClient {
         // Import wallet button
         const importBtn = document.createElement('button');
         importBtn.className = 'cc-burner-import';
-        importBtn.textContent = '↓ Import';
+        importBtn.textContent = privy ? 'Import key' : '↓ Import';
         importBtn.addEventListener('click', () => {
             const form = document.getElementById('cc-import-form');
             if (form) {
@@ -6315,7 +6694,9 @@ class CryptoClient {
         // Warning
         const warning = document.createElement('div');
         warning.className = 'cc-burner-warning';
-        warning.textContent = 'Burner wallets are stored locally. Only use for small amounts.';
+        warning.textContent = privy
+            ? 'Burner wallets live only in this browser. Export a key to back it up, and keep amounts small.'
+            : 'Burner wallets are stored locally. Only use for small amounts.';
         container.appendChild(warning);
 
         // Fetch balances asynchronously

@@ -90,7 +90,12 @@ new CryptoClient({
 
 ### Theming the overlay
 
-The default **privy** skin draws a compact centered dialog (a bottom sheet under 700px wide) with individually bordered rows, your logo, a "current wallet" strip in the burner manager and a spinner → check confirmation when a wallet connects. Everything takes the one `theme.accent` colour, and every sub-view (burner manager, transfer, bulk buy) follows light/dark.
+The default **privy** skin draws a compact centered dialog (a bottom sheet under 700px wide) with individually bordered rows, your logo and a spinner → check confirmation when a wallet connects. It also reworks the flows:
+
+- **Connect** — ready-to-use wallets first; the rest sit under "More wallets" with an explicit **Install** pill instead of silently opening a store page.
+- **Your wallet** — the connected view shows the SOL balance (pool-routed, with a loading shimmer), a one-click copy for the address and a Solscan link; Switch / Disconnect are a quiet pair, not a loud primary.
+- **Burner manager** — each row says what clicking it does (**Use**, or an **Active** tag on the current one), options open from a compact "more" button, and Delete is an inline two-step confirm instead of the browser's `confirm()` popup.
+- Title rows align with the close button, views ease in, keyboard focus rings everywhere, and toasts are a compact pill. Everything takes the one `theme.accent` colour, and every sub-view (burner manager, transfer, bulk buy) follows light/dark.
 
 ```javascript
 new CryptoClient({
