@@ -4816,8 +4816,10 @@ class CryptoClient {
 
             /* burner manager */
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-wrapper + .cc-burner-item-wrapper { border-top-color: var(--cc-skin-dk-divider); }
-            /* the open row is a recessed well holding lifted tiles (light: grey well, white tiles) */
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-wrapper.active { background: color-mix(in srgb, var(--cc-skin-dark-lo), #000 18%); }
+            /* the current wallet's row gets a quiet highlight; an OPEN row becomes a
+               recessed well holding lifted tiles (light: grey well, white tiles) */
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-wrapper.active { background: var(--cc-skin-dk-hover); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-wrapper.expanded { background: color-mix(in srgb, var(--cc-skin-dark-lo), #000 18%); }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-options-toggle {
               background: var(--cc-skin-dk-hover);
               box-shadow: inset 0 0 0 1px var(--cc-skin-dk-line);
