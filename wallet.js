@@ -4059,6 +4059,13 @@ class CryptoClient {
               transform: translate(-50%, -50%) scale(1);
             }
             html #cc-wallet-modal .cc-modal * { font-family: inherit; }
+            /* the host page's text settings (letter-spacing, transforms) must not leak in */
+            html[data-cc-wallet-theme] #cc-wallet-modal .cc-modal,
+            html[data-cc-wallet-theme] #cc-header-btn,
+            html[data-cc-wallet-theme] .cc-transfer-modal,
+            html[data-cc-wallet-theme] .cc-bulk-modal,
+            html[data-cc-wallet-theme] .cc-modal-backdrop:not(#cc-wallet-modal) > .cc-modal,
+            html[data-cc-wallet-theme] .cc-burner-copied { letter-spacing: normal; text-transform: none; word-spacing: normal; }
             /* the skin's widths assume border-box (ProofFront sets it globally;
                a host page may not) — without it padded 100%-wide rows overflow */
             html #cc-wallet-modal .cc-modal,
