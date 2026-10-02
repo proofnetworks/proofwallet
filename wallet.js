@@ -51,24 +51,25 @@ const patchSolanaConnection = (function () {
     //   methodMaxBatch: { [method]: n }      skip when params[0].length > n
     //   dailyQuota: true                     a plan/quota 429 parks to UTC midnight
     const EMPIRICAL_SPECS = {
-        // ProofNetwork's own JSON-RPC proxy (server/services/rpc-proxy.ts): the
-        // SERVER's pool (Foundation + keyed members) with a result cache and
-        // in-flight dedup, behind a per-IP budget of 100 burst / 50 rps. First
-        // member: it is the only way a page reaches api.mainnet-beta at all.
-        'https://proofnetwork.lol/rpc': {
-            read: { burst: 100, refillPerSec: 50 },
-            write: { burst: 50, refillPerSec: 10 },
-            rank: 0,
-        },
+        // ROUTING ORDER (rank, lowest first; ties go to the fullest bucket):
+        //   0  a site's own keyed RPC (window.SOL_RPC_URLS / addEndpoint) — it pays for it
+        //   1  publicnode — free, and each visitor spends THEIR OWN per-IP budget
+        //   2  QuickNode demo / LeoRPC — small free fallbacks, reads only
+        //   3  ProofNetwork's proxy — LAST RESORT: it spends ProofNetwork's
+        //      server-side pool, so a page only reaches it when publicnode is
+        //      unreachable from this visitor's network (see the connection check),
+        //      rate-limited, or denies the method (getTokenAccountsByOwner).
         'https://solana-rpc.publicnode.com': {
             read: { burst: 200, refillPerSec: 30 },
             write: { burst: 200, refillPerSec: 10 },
             methodDenylist: ['getTokenAccountsByOwner'],
             methodMaxBatch: { getMultipleAccounts: 10 },
+            rank: 1,
         },
         'https://docs-demo.solana-mainnet.quiknode.pro': {
             read: { burst: 3, refillPerSec: 3 },
             write: { burst: 0, refillPerSec: 0 },
+            rank: 2,
             dailyQuota: true,
             methodDenylist: ['getMultipleAccounts', 'getBlockHeight', 'getEpochInfo', 'getProgramAccounts', 'sendTransaction', 'requestAirdrop'],
             methodMaxBatch: { getSignatureStatuses: 190 },
@@ -76,7 +77,18 @@ const patchSolanaConnection = (function () {
         'https://solana.leorpc.com/?api_key=FREE': {
             read: { burst: 1, refillPerSec: 1 },
             write: { burst: 0, refillPerSec: 0 },
+            rank: 2,
             methodDenylist: ['getMultipleAccounts', 'getEpochInfo', 'getProgramAccounts', 'sendTransaction', 'requestAirdrop'],
+        },
+        // ProofNetwork's own JSON-RPC proxy (server/services/rpc-proxy.ts): the
+        // SERVER's pool (Foundation + keyed members) with a result cache and
+        // in-flight dedup, behind a per-IP budget of 100 burst / 50 rps. It is
+        // also the only way a page reaches api.mainnet-beta at all. Last resort
+        // (rank 3) so browser traffic doesn't eat ProofNetwork's upstream budget.
+        'https://proofnetwork.lol/rpc': {
+            read: { burst: 100, refillPerSec: 50 },
+            write: { burst: 50, refillPerSec: 10 },
+            rank: 3,
         },
         // Tombstones — kept so a stale DEFAULT_URLS override cannot re-enable
         // them with a generous FALLBACK_SPEC. Do NOT route to these from a page.
@@ -94,15 +106,15 @@ const patchSolanaConnection = (function () {
         },
     };
 
-    // Unknown URL (a site's own keyed RPC): paid-tier shaped, the 429 handling
-    // below degrades it gracefully if the real tier is lower.
-    const FALLBACK_SPEC = { read: { burst: 100, refillPerSec: 50 }, write: { burst: 50, refillPerSec: 10 } };
+    // Unknown URL (a site's own keyed RPC): paid-tier shaped and routed FIRST
+    // (rank 0); the 429 handling below degrades it gracefully if the real tier is lower.
+    const FALLBACK_SPEC = { read: { burst: 100, refillPerSec: 50 }, write: { burst: 50, refillPerSec: 10 }, rank: 0 };
 
     const DEFAULT_URLS = [
-        'https://proofnetwork.lol/rpc',
         'https://solana-rpc.publicnode.com',
         'https://docs-demo.solana-mainnet.quiknode.pro',
         'https://solana.leorpc.com/?api_key=FREE',
+        'https://proofnetwork.lol/rpc',
     ];
 
     function isWriteMethod(method) {
@@ -461,12 +473,14 @@ const patchSolanaConnection = (function () {
     // their generous bucket is full): set window.SOL_RPC_URLS before this loads.
     const extra = (typeof window !== 'undefined' && Array.isArray(window.SOL_RPC_URLS)) ? window.SOL_RPC_URLS.filter(function (u) { return typeof u === 'string' && /^https:\/\//.test(u); }) : [];
     const pool = new SolRpcPool(extra.concat(DEFAULT_URLS));
-    // Connection check at load: the two members that carry most traffic get one
-    // cheap getSlot, so a member this visitor's network blocks is parked before
-    // the first real call can stall on it. Quota-limited members are not probed.
+    // Connection check at load: publicnode (and a site's own RPC) get one cheap
+    // getSlot, so a member this visitor's network blocks is parked before the
+    // first real call can stall on it — traffic then falls to the next member.
+    // The ProofNetwork proxy is NOT probed (it is the last resort and every
+    // pageview would otherwise cost it a call); quota-limited members neither.
     if (typeof window !== 'undefined' && typeof fetch === 'function' && !window.SOL_RPC_NO_PROBE) {
         setTimeout(function () {
-            pool.probe(['https://proofnetwork.lol/rpc', 'https://solana-rpc.publicnode.com'].concat(extra)).catch(function () {});
+            pool.probe(['https://solana-rpc.publicnode.com'].concat(extra)).catch(function () {});
         }, 0);
     }
 
@@ -8334,9 +8348,8 @@ class CryptoClient {
     static get SYNDICA_RPC() {
         const pool = window.solRpcPool;
         if (pool && typeof pool.pickUrl === 'function') return pool.pickUrl();
-        // No pool loaded: ProofNetwork's own proxy (api.mainnet-beta.solana.com
-        // answers 403 to every browser Origin; the proxy serves it server-side).
-        return 'https://proofnetwork.lol/rpc';
+        // No pool loaded: publicnode (keyless, CORS *, the visitor's own budget).
+        return 'https://solana-rpc.publicnode.com';
     }
 
     /**
