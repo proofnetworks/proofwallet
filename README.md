@@ -17,7 +17,7 @@ If you're building a UI for a ProofNetwork contract — game, marketplace, DAO, 
 - **Privacy mode** — `window.privacyMode = true` routes burner transfers through PrivacyCash (a "Private Transfer" sheet in sky blue and a private-transfer receipt); the wallet picker is unchanged
 - **Polling** — `pollContract(fn, …, frequency, onUpdate)` for view functions with an automatic error budget
 - **Drop-in UI** — auto-rendered Connect button, wallet-selection modal, toasts, result modals
-- **Privy-style skin** — a compact light/dark dialog (bottom sheet on phones) with your logo, one accent colour, a persisted theme toggle and a connect confirmation; `skin: 'classic'` keeps the original dark sheet
+- **Privy-style skin** — a compact light/dark dialog (bottom sheet on phones) with your logo, one accent colour, light or dark chosen by the project, and a connect confirmation; `skin: 'classic'` keeps the original dark sheet
 
 ---
 
@@ -75,7 +75,7 @@ new CryptoClient({
   icon:            string,      // Logo URL shown above "Connect Wallet" (privy skin)
   brand:           string | false, // Footer "Protected by <brand>" — default: 'ProofNetwork'; false hides it
   theme: {
-    mode:          'light' | 'dark', // First-visit theme (privy skin); the in-dialog toggle persists after
+    mode:          'light' | 'dark', // Overlay theme (privy skin) — a project choice; visitors get no toggle
     accent:        string,      // Primary-action colour — any CSS colour or var(); default: '#676fff'
     accentInk:     string,      // Text colour on the accent — default: '#ffffff' (use a dark ink on light accents)
     privacyAccent: string,      // Privacy-mode colour (Private Transfer sheet + receipt) — default: '#0ea5e9' sky
@@ -106,7 +106,7 @@ new CryptoClient({
   },
 });
 
-wallet.setWalletTheme('light');        // switch programmatically (persisted in localStorage 'cc-wallet-theme')
+wallet.setWalletTheme('light');        // switch from your own code (not persisted; there is no visitor toggle)
 ```
 
 The theme is set as `html[data-cc-wallet-theme="light" | "dark"]`, so page CSS can key off it too.

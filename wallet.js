@@ -3893,21 +3893,19 @@ class CryptoClient {
 
     // ==================== PRIVY SKIN ====================
     // config.skin = 'privy' (default) dresses the overlay as a compact Privy-style
-    // dialog: light/dark palette with a persisted sun/moon toggle, app logo above
+    // dialog: light or dark (chosen by the project), app logo above
     // the title, phone bottom-sheet grabber, "Protected by" footer, a "current
     // wallet" strip in the burner manager and a spinner → check interstitial on
     // connect. config.skin = 'classic' keeps the original dark sheet untouched.
     //
     // config.theme knobs (all optional):
-    //   mode:      'light' | 'dark'        first-visit theme (the toggle persists after)
+    //   mode:      'light' | 'dark'        the overlay's theme — a project choice, no visitor toggle
     //   accent:    any CSS colour or var()  e.g. '#676fff', 'var(--brand)'
     //   accentInk: text colour ON the accent (default #fff; use a dark ink on a light accent)
     //   font:      font-family stack for the overlay
     //   vars:      { '--cc-…': value }      raw overrides (e.g. --cc-skin-dark-hi / -lo)
     // config.icon  → logo shown above "Connect Wallet" (else a vault glyph tile)
     // config.brand → footer brand ("Protected by <brand>"), default 'ProofNetwork'; false hides it
-
-    static get WALLET_THEME_KEY() { return 'cc-wallet-theme'; }
 
     injectSkinStyles() {
         if (document.getElementById('cc-wallet-skin')) return;
@@ -3926,15 +3924,15 @@ class CryptoClient {
                  --cc-skin-accent-hover   pressed/hover accent
                  --cc-skin-font           UI face
                  --cc-skin-dark-hi/-lo    dark-mode dialog gradient
-               html[data-cc-wallet-theme] = 'light' | 'dark' (persisted toggle).
+               html[data-cc-wallet-theme] = 'light' | 'dark' (config.theme.mode).
             ═══════════════════════════════════════════════════════════════ */
             html[data-cc-wallet-theme] {
                 --cc-skin-font: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
                 --cc-skin-mono: ui-monospace, 'SF Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
                 --cc-skin-accent-ink: #ffffff;
                 --cc-skin-accent-hover: color-mix(in srgb, var(--cc-accent) 88%, #000);
-                --cc-skin-dark-hi: #1b1d29;
-                --cc-skin-dark-lo: #14151d;
+                --cc-skin-dark-hi: #17181e;
+                --cc-skin-dark-lo: #111217;
                 --cc-accent-orange: #f79009;
                 --cc-accent-green: #12b76a;
                 --cc-accent-purple: #7a5af8;
@@ -3952,14 +3950,27 @@ class CryptoClient {
                 --cc-text-tertiary: #98a2b3;
             }
             html[data-cc-wallet-theme="dark"] {
+                /* surface ladder, derived from the two dialog colours */
+                --cc-skin-dk-raised: color-mix(in srgb, var(--cc-skin-dark-hi), #fff 4%);
+                --cc-skin-dk-hover: color-mix(in srgb, var(--cc-skin-dark-hi), #fff 7.5%);
+                --cc-skin-dk-pressed: color-mix(in srgb, var(--cc-skin-dark-hi), #fff 11%);
+                --cc-skin-dk-sunken: color-mix(in srgb, var(--cc-skin-dark-lo), #000 35%);
+                --cc-skin-dk-line: rgba(255, 255, 255, 0.08);
+                --cc-skin-dk-line-strong: rgba(255, 255, 255, 0.14);
+                --cc-skin-dk-divider: rgba(255, 255, 255, 0.06);
+                --cc-skin-dk-edge: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+                --cc-skin-dk-ink: #f3f4f7;
+                --cc-skin-dk-ink-2: #a6aab9;
+                --cc-skin-dk-ink-3: #6f7487;
+
                 --cc-bg-primary: var(--cc-skin-dark-lo);
-                --cc-bg-secondary: rgba(255, 255, 255, 0.05);
-                --cc-bg-elevated: rgba(255, 255, 255, 0.09);
-                --cc-border: color-mix(in srgb, var(--cc-accent) 12%, transparent);
-                --cc-border-hover: color-mix(in srgb, var(--cc-accent) 26%, transparent);
-                --cc-text-primary: #f2f3fa;
-                --cc-text-secondary: #a5abc0;
-                --cc-text-tertiary: #717892;
+                --cc-bg-secondary: var(--cc-skin-dk-raised);
+                --cc-bg-elevated: var(--cc-skin-dk-hover);
+                --cc-border: var(--cc-skin-dk-line);
+                --cc-border-hover: var(--cc-skin-dk-line-strong);
+                --cc-text-primary: var(--cc-skin-dk-ink);
+                --cc-text-secondary: var(--cc-skin-dk-ink-2);
+                --cc-text-tertiary: var(--cc-skin-dk-ink-3);
             }
 
             /* ── the button: Privy-style white pill ────────────────────────────────────── */
@@ -4187,7 +4198,7 @@ class CryptoClient {
             html #cc-wallet-modal #cc-connected-view {
               width: 100%;
               max-height: none;
-              padding: 32px 0 0; /* clear the floating theme toggle / close circles */
+              padding: 32px 0 0; /* clear the floating close circle */
               background: transparent;
               border: 0;
               box-shadow: none;
@@ -4353,7 +4364,7 @@ class CryptoClient {
               width: 100%;
               max-height: none;
               overflow: visible;
-              padding: 32px 0 0; /* clear the floating theme toggle / close circles (the back chip sits top-left) */
+              padding: 32px 0 0; /* clear the floating close circle (the back chip sits top-left) */
               background: transparent;
               border: 0;
               box-shadow: none;
@@ -4690,172 +4701,189 @@ class CryptoClient {
               background: rgba(18, 183, 106, 0.12);
               color: #027a48;
             }
-            html[data-cc-wallet-theme="dark"] .cc-skin-current { background: rgba(255, 255, 255, 0.06); }
-            html[data-cc-wallet-theme="dark"] .cc-skin-current-info b { color: #f2f3fa; }
-            html[data-cc-wallet-theme="dark"] .cc-skin-current-info span { color: #a5abc0; }
-            html[data-cc-wallet-theme="dark"] .cc-skin-current-tag { background: rgba(18, 183, 106, 0.18); color: #32d583; }
-
-            /* ── sun/moon theme toggle — mirrors the close circle, top-left ───────────── */
-            html #cc-wallet-modal .cc-skin-theme {
-              position: absolute;
-              top: 14px; left: 14px;
-              width: 28px; height: 28px;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              border: 0;
-              border-radius: 50%;
-              background: #f2f3f7;
-              color: #667085;
-              cursor: pointer;
-              transition: background 0.15s ease, color 0.15s ease;
-              /* moon glyph (light mode → "switch to dark") */
-              --cc-skin-theme-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'/%3E%3C/svg%3E");
+            /* ── DARK theme ──────────────────────────────────────────────────────────
+               Built on surface tokens, not translucent white over a gradient:
+                 dialog   = --cc-skin-dark-hi → -lo (a barely-there vertical falloff)
+                 raised   = one step lighter (rows, cards, list group)
+                 hover    = two steps · pressed = three · sunken = inputs
+               Hairlines are neutral white-alpha; the accent is kept for actions,
+               focus and a faint top glow. Rows carry a 1px top edge highlight so
+               they read as lifted, the way the light theme's white rows read on
+               their hairlines. */
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal.cc-modal-backdrop {
+              background: rgba(4, 5, 8, 0.76);
             }
-            html #cc-wallet-modal .cc-skin-theme:hover { background: #e9eaef; color: #101828; }
-            html #cc-wallet-modal .cc-skin-theme::after {
-              content: '';
-              width: 15px; height: 15px;
-              background: currentColor;
-              -webkit-mask: var(--cc-skin-theme-glyph) center / contain no-repeat;
-              mask: var(--cc-skin-theme-glyph) center / contain no-repeat;
-            }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-skin-theme {
-              /* sun glyph (dark mode → "switch to light") */
-              --cc-skin-theme-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M12 7a5 5 0 1 0 0 10A5 5 0 0 0 12 7zm8.5 4H23v2h-2.5v-2zM1 11h2.5v2H1v-2zM11 1h2v2.5h-2V1zm0 20h2v2.5h-2V21zM4.9 3.5 6.7 5.3 5.3 6.7 3.5 4.9 4.9 3.5zm14.2 0 1.4 1.4-1.8 1.8-1.4-1.4 1.8-1.8zM5.3 17.3l1.4 1.4-1.8 1.8-1.4-1.4 1.8-1.8zm13.4 0 1.8 1.8-1.4 1.4-1.8-1.8 1.4-1.4z'/%3E%3C/svg%3E");
-            }
-
-            /* ── DARK theme (html[data-cc-wallet-theme="dark"]) — Privy dark mode ────────
-               the light skin hardcodes its neutrals, so dark re-declares every hardcoded
-               surface/ink; --cc-* vars are swapped by applyWalletTheme (core/wallet.js) */
             html[data-cc-wallet-theme="dark"] #cc-header-btn,
             html[data-cc-wallet-theme="dark"] #cc-header-btn.connected {
-              color: #f2f3fa;
-              background: #191b26;
-              border-color: color-mix(in srgb, var(--cc-accent) 20%, transparent);
+              color: var(--cc-skin-dk-ink);
+              background: var(--cc-skin-dk-raised);
+              border-color: var(--cc-skin-dk-line);
+              box-shadow: var(--cc-skin-dk-edge), 0 1px 2px rgba(0, 0, 0, 0.4);
             }
             html[data-cc-wallet-theme="dark"] #cc-header-btn:hover {
-              background: #20222f;
-              border-color: color-mix(in srgb, var(--cc-accent) 34%, transparent);
+              background: var(--cc-skin-dk-hover);
+              border-color: var(--cc-skin-dk-line-strong);
             }
-            html[data-cc-wallet-theme="dark"] #cc-header-btn .cc-header-btn-address { color: #a5abc0; }
+            html[data-cc-wallet-theme="dark"] #cc-header-btn .cc-header-btn-address { color: var(--cc-skin-dk-ink-2); }
 
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-modal {
               background:
-                radial-gradient(120% 55% at 50% -8%, color-mix(in srgb, var(--cc-accent) 14%, transparent), transparent 60%),
+                radial-gradient(90% 40% at 50% -6%, color-mix(in srgb, var(--cc-accent) 9%, transparent), transparent 70%),
                 linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo));
-              border-color: color-mix(in srgb, var(--cc-accent) 16%, transparent);
+              border-color: var(--cc-skin-dk-line);
               box-shadow:
-                inset 0 1px 0 rgba(255, 255, 255, 0.06),
-                0 20px 50px -12px rgba(0, 0, 0, 0.75),
-                0 0 70px -18px color-mix(in srgb, var(--cc-accent) 28%, transparent);
+                inset 0 1px 0 rgba(255, 255, 255, 0.05),
+                0 0 0 1px rgba(0, 0, 0, 0.5),
+                0 24px 64px -12px rgba(0, 0, 0, 0.8);
             }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-modal::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-modal::-webkit-scrollbar-thumb { background: var(--cc-skin-dk-line-strong); }
+
+            /* chips: close / back */
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-close-btn,
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-skin-theme,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-back {
-              background: rgba(255, 255, 255, 0.08);
-              color: #a5abc0;
+              background: var(--cc-skin-dk-raised);
+              box-shadow: var(--cc-skin-dk-edge), 0 0 0 1px var(--cc-skin-dk-line);
+              color: var(--cc-skin-dk-ink-2);
             }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-close-btn:hover,
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-skin-theme:hover,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-back:hover {
-              background: rgba(255, 255, 255, 0.14);
-              color: #f2f3fa;
+              background: var(--cc-skin-dk-hover);
+              color: var(--cc-skin-dk-ink);
             }
+
+            /* ink */
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-title,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-title,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-name,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-connected-wallet-name,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-title,
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-name { color: #f2f3fa; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-name { color: var(--cc-skin-dk-ink); }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-subtitle,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-connected-wallet-address,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-desc,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-address,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-balance,
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal #cc-status { color: #a5abc0; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal #cc-status { color: var(--cc-skin-dk-ink-2); }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-status,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-arrow,
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-arrow { color: #717892; }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-balance[style*="255, 255, 255"] { color: #717892 !important; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-arrow { color: var(--cc-skin-dk-ink-3); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-balance[style*="255, 255, 255"] { color: var(--cc-skin-dk-ink-3) !important; }
 
+            /* raised rows */
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-btn,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-btn,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-connected-wallet-info,
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action {
-              background: rgba(255, 255, 255, 0.045);
-              border-color: color-mix(in srgb, var(--cc-accent) 11%, transparent);
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-list {
+              background: var(--cc-skin-dk-raised);
+              border-color: var(--cc-skin-dk-line);
+              box-shadow: var(--cc-skin-dk-edge);
             }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-btn:hover,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-btn:hover,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action:hover {
-              background: rgba(255, 255, 255, 0.08);
-              border-color: color-mix(in srgb, var(--cc-accent) 30%, transparent);
+              background: var(--cc-skin-dk-hover);
+              border-color: var(--cc-skin-dk-line-strong);
             }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-btn:active,
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-btn:active { background: rgba(255, 255, 255, 0.11); }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-last-used-badge {
-              background: rgba(255, 255, 255, 0.08);
-              color: #a5abc0;
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-btn:active { background: var(--cc-skin-dk-pressed); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-btn:focus-visible,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-btn:focus-visible {
+              outline: none;
+              border-color: var(--cc-accent);
+              box-shadow: 0 0 0 3px color-mix(in srgb, var(--cc-accent) 22%, transparent);
             }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-icon.burner { background: rgba(247, 144, 9, 0.16); color: #fdb022; }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-icon.transfer { background: rgba(18, 183, 106, 0.16); color: #32d583; }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-icon.swap { background: rgba(122, 90, 248, 0.18); color: #9b8afb; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-icon,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-connected-wallet-icon { box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-last-used-badge {
+              background: color-mix(in srgb, var(--cc-accent) 14%, transparent);
+              color: color-mix(in srgb, var(--cc-accent) 55%, #fff);
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-connected-wallet-dot { box-shadow: 0 0 0 3px rgba(18, 183, 106, 0.18), 0 0 10px rgba(18, 183, 106, 0.5); }
+
+            /* quick-action glyph tiles: tinted wells with a hairline ring */
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-icon { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-icon.burner { background: rgba(247, 144, 9, 0.13); color: #fdb022; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-icon.transfer { background: rgba(18, 183, 106, 0.13); color: #3ccb7f; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-icon.swap { background: rgba(122, 90, 248, 0.15); color: #a48afb; }
+
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-disconnect-btn-small {
-              background: rgba(255, 255, 255, 0.03);
-              border: 1px solid rgba(255, 255, 255, 0.12);
+              background: transparent;
+              border: 1px solid var(--cc-skin-dk-line);
               color: #f97066;
             }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-disconnect-btn-small:hover { background: rgba(240, 68, 56, 0.12); border-color: rgba(240, 68, 56, 0.3); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-disconnect-btn-small:hover { background: rgba(240, 68, 56, 0.1); border-color: rgba(240, 68, 56, 0.32); }
 
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-list {
-              background: rgba(255, 255, 255, 0.045);
-              border-color: color-mix(in srgb, var(--cc-accent) 11%, transparent);
-            }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-wrapper + .cc-burner-item-wrapper { border-top-color: rgba(255, 255, 255, 0.08); }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-wrapper.active { background: rgba(255, 255, 255, 0.05); }
+            /* burner manager */
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-wrapper + .cc-burner-item-wrapper { border-top-color: var(--cc-skin-dk-divider); }
+            /* the open row is a recessed well holding lifted tiles (light: grey well, white tiles) */
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-wrapper.active { background: color-mix(in srgb, var(--cc-skin-dark-lo), #000 18%); }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-options-toggle {
-              background: rgba(255, 255, 255, 0.08);
-              color: #a5abc0;
+              background: var(--cc-skin-dk-hover);
+              box-shadow: inset 0 0 0 1px var(--cc-skin-dk-line);
+              color: var(--cc-skin-dk-ink-2);
             }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-options-toggle:hover,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-options-toggle.open {
-              background: rgba(255, 255, 255, 0.14);
-              color: #f2f3fa;
+              background: var(--cc-skin-dk-pressed);
+              color: var(--cc-skin-dk-ink);
             }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action-label { color: #a5abc0; }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action-icon { color: #a5abc0; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action { background: var(--cc-skin-dk-hover); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action:hover { background: var(--cc-skin-dk-pressed); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action-label,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action-icon { color: var(--cc-skin-dk-ink-2); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action:hover .cc-burner-action-label,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action:hover .cc-burner-action-icon { color: var(--cc-skin-dk-ink); }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action.delete .cc-burner-action-icon,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action.delete .cc-burner-action-label { color: #f97066; }
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action.delete:hover { background: rgba(240, 68, 56, 0.12); border-color: rgba(240, 68, 56, 0.3); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action.delete:hover { background: rgba(240, 68, 56, 0.1); border-color: rgba(240, 68, 56, 0.32); }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-rename-input {
-              background: rgba(0, 0, 0, 0.28);
-              border-color: color-mix(in srgb, var(--cc-accent) 24%, transparent);
-              color: #f2f3fa;
+              background: var(--cc-skin-dk-sunken);
+              border-color: var(--cc-skin-dk-line-strong);
+              color: var(--cc-skin-dk-ink);
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-rename-input:focus {
+              outline: none;
+              border-color: var(--cc-accent);
+              box-shadow: 0 0 0 3px color-mix(in srgb, var(--cc-accent) 22%, transparent);
             }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-import,
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-bulk-buy-btn {
-              background: rgba(255, 255, 255, 0.05);
-              border-color: color-mix(in srgb, var(--cc-accent) 16%, transparent);
-              color: #f2f3fa;
+              background: var(--cc-skin-dk-raised);
+              border-color: var(--cc-skin-dk-line);
+              box-shadow: var(--cc-skin-dk-edge);
+              color: var(--cc-skin-dk-ink);
             }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-import:hover,
-            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-bulk-buy-btn:hover { background: rgba(255, 255, 255, 0.09); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-bulk-buy-btn:hover {
+              background: var(--cc-skin-dk-hover);
+              border-color: var(--cc-skin-dk-line-strong);
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-generate { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-switch-wallet-btn { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18); }
             html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-warning {
-              background: rgba(255, 255, 255, 0.05);
-              border-color: rgba(255, 255, 255, 0.06);
-              color: #a5abc0;
+              background: var(--cc-skin-dk-sunken);
+              border-color: var(--cc-skin-dk-divider);
+              color: var(--cc-skin-dk-ink-3);
             }
+            html[data-cc-wallet-theme="dark"] .cc-skin-current {
+              background: var(--cc-skin-dk-raised);
+              box-shadow: var(--cc-skin-dk-edge), 0 0 0 1px var(--cc-skin-dk-line);
+            }
+            html[data-cc-wallet-theme="dark"] .cc-skin-current-info b { color: var(--cc-skin-dk-ink); }
+            html[data-cc-wallet-theme="dark"] .cc-skin-current-info span { color: var(--cc-skin-dk-ink-2); }
+            html[data-cc-wallet-theme="dark"] .cc-skin-current-tag { background: rgba(18, 183, 106, 0.14); color: #3ccb7f; }
+
+            /* footer, connect interstitial, grabber */
             html[data-cc-wallet-theme="dark"] .cc-skin-badge {
-              border-top-color: rgba(255, 255, 255, 0.08);
-              color: #717892;
+              border-top-color: var(--cc-skin-dk-divider);
+              color: var(--cc-skin-dk-ink-3);
             }
-            html[data-cc-wallet-theme="dark"] .cc-skin-badge b { color: #a5abc0; }
+            html[data-cc-wallet-theme="dark"] .cc-skin-badge b { color: var(--cc-skin-dk-ink-2); }
             html[data-cc-wallet-theme="dark"] .cc-skin-success { background: linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo)); }
-            html[data-cc-wallet-theme="dark"] .cc-skin-success-label { color: #f2f3fa; }
-            html[data-cc-wallet-theme="dark"] .cc-skin-success-spin { border-color: rgba(255, 255, 255, 0.12); border-top-color: var(--cc-accent); }
-            html[data-cc-wallet-theme="dark"] .cc-skin-grip { background: rgba(255, 255, 255, 0.28); }
+            html[data-cc-wallet-theme="dark"] .cc-skin-success-label { color: var(--cc-skin-dk-ink); }
+            html[data-cc-wallet-theme="dark"] .cc-skin-success-spin { border-color: var(--cc-skin-dk-line-strong); border-top-color: var(--cc-accent); }
+            html[data-cc-wallet-theme="dark"] .cc-skin-grip { background: var(--cc-skin-dk-line-strong); }
 
             /* ── Transfer / Bulk Buy sheets + the burner import form ──────────────
                The base sheet paints these with hardcoded dark surfaces and an
@@ -4869,9 +4897,9 @@ class CryptoClient {
                 --cc-skin-danger-ink: #d92d20;
             }
             html[data-cc-wallet-theme="dark"] {
-                --cc-skin-row: rgba(255, 255, 255, 0.045);
-                --cc-skin-row-hover: rgba(255, 255, 255, 0.08);
-                --cc-skin-input: rgba(0, 0, 0, 0.28);
+                --cc-skin-row: var(--cc-skin-dk-raised);
+                --cc-skin-row-hover: var(--cc-skin-dk-hover);
+                --cc-skin-input: var(--cc-skin-dk-sunken);
                 --cc-skin-danger-ink: #f97066;
             }
             html[data-cc-wallet-theme] {
@@ -4904,9 +4932,9 @@ class CryptoClient {
             html[data-cc-wallet-theme="dark"] .cc-transfer-modal.cc-privacy-mode,
             html[data-cc-wallet-theme="dark"] .cc-bulk-modal {
                 background:
-                    radial-gradient(120% 55% at 50% -8%, color-mix(in srgb, var(--cc-accent) 14%, transparent), transparent 60%),
+                    radial-gradient(90% 40% at 50% -6%, color-mix(in srgb, var(--cc-accent) 9%, transparent), transparent 70%),
                     linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo));
-                box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 20px 50px -12px rgba(0, 0, 0, 0.75);
+                box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 0 0 1px rgba(0, 0, 0, 0.5), 0 24px 64px -12px rgba(0, 0, 0, 0.8);
             }
             html[data-cc-wallet-theme] .cc-transfer-modal *,
             html[data-cc-wallet-theme] .cc-bulk-modal * { font-family: inherit; }
@@ -5139,14 +5167,14 @@ class CryptoClient {
                 --cc-skin-privacy-link: color-mix(in srgb, var(--cc-skin-privacy) 72%, #000);
             }
             html[data-cc-wallet-theme="dark"] {
-                --cc-skin-ink: #f2f3fa;
-                --cc-skin-ink-2: #a5abc0;
-                --cc-skin-ink-3: #717892;
-                --cc-skin-panel: rgba(255, 255, 255, 0.045);
-                --cc-skin-panel-2: rgba(255, 255, 255, 0.03);
-                --cc-skin-hairline: rgba(255, 255, 255, 0.07);
-                --cc-skin-btn: rgba(255, 255, 255, 0.09);
-                --cc-skin-privacy-surface: radial-gradient(120% 55% at 50% -8%, color-mix(in srgb, var(--cc-skin-privacy) 16%, transparent), transparent 60%), linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo));
+                --cc-skin-ink: var(--cc-skin-dk-ink);
+                --cc-skin-ink-2: var(--cc-skin-dk-ink-2);
+                --cc-skin-ink-3: var(--cc-skin-dk-ink-3);
+                --cc-skin-panel: var(--cc-skin-dk-raised);
+                --cc-skin-panel-2: var(--cc-skin-dk-hover);
+                --cc-skin-hairline: var(--cc-skin-dk-line);
+                --cc-skin-btn: var(--cc-skin-dk-hover);
+                --cc-skin-privacy-surface: radial-gradient(90% 40% at 50% -6%, color-mix(in srgb, var(--cc-skin-privacy) 10%, transparent), transparent 70%), linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo));
                 --cc-skin-privacy-ink: color-mix(in srgb, var(--cc-skin-privacy) 55%, #fff);
                 --cc-skin-privacy-link: color-mix(in srgb, var(--cc-skin-privacy) 80%, #fff);
             }
@@ -5180,22 +5208,17 @@ class CryptoClient {
             }
         }
 
-        let saved = null;
-        try { saved = localStorage.getItem(CryptoClient.WALLET_THEME_KEY); } catch { /* storage blocked */ }
-        this.setWalletTheme(saved || t.mode || 'light', false);
+        this.setWalletTheme(t.mode || 'light');
     }
 
     /**
-     * Switch the Privy skin between light and dark.
+     * Switch the Privy skin between light and dark. The theme is a PROJECT
+     * choice (config.theme.mode) — there is no visitor-facing toggle and
+     * nothing is persisted; call this only from the project's own code.
      * @param {'light'|'dark'} mode
-     * @param {boolean} [persist=true] Remember the choice for the next visit
      */
-    setWalletTheme(mode, persist = true) {
-        const m = mode === 'dark' ? 'dark' : 'light';
-        document.documentElement.setAttribute('data-cc-wallet-theme', m);
-        if (persist) {
-            try { localStorage.setItem(CryptoClient.WALLET_THEME_KEY, m); } catch { /* storage blocked */ }
-        }
+    setWalletTheme(mode) {
+        document.documentElement.setAttribute('data-cc-wallet-theme', mode === 'dark' ? 'dark' : 'light');
     }
 
     /**
@@ -5255,17 +5278,7 @@ class CryptoClient {
             modal.appendChild(badge);
         }
 
-        // 4. sun/moon toggle, top-left (mirrors the close circle)
-        const themeBtn = el('button', 'cc-skin-theme', 'wallet-theme-toggle');
-        themeBtn.type = 'button';
-        themeBtn.setAttribute('aria-label', 'Toggle dark mode');
-        themeBtn.addEventListener('click', () => {
-            const dark = document.documentElement.getAttribute('data-cc-wallet-theme') === 'dark';
-            this.setWalletTheme(dark ? 'light' : 'dark');
-        });
-        modal.appendChild(themeBtn);
-
-        // 5. "current wallet" strip at the top of the burner manager. The burner
+        // 4. "current wallet" strip at the top of the burner manager. The burner
         //    view is rebuilt with replaceChildren() on every open, so re-insert
         //    after each render.
         const burnerView = document.getElementById('cc-burner-view');
@@ -5300,7 +5313,7 @@ class CryptoClient {
             insertCurrent();
         }
 
-        // 6. connect interstitial: spinner → green check + "Connected to <wallet>".
+        // 5. connect interstitial: spinner → green check + "Connected to <wallet>".
         //    onConnectSuccess writes "Connecting to X..." / "Connected!" into
         //    #cc-status and hides the overlay ~600ms later with no feedback, so
         //    this keys off the status text and holds the overlay open until the
