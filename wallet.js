@@ -121,6 +121,9 @@ const patchSolanaConnection = (function () {
             this.endpoints = [];
             for (let i = 0; i < urls.length; i++) this.addEndpoint(urls[i]);
             this.maxRetries = opts.maxRetries != null ? opts.maxRetries : 4;
+            // A blocked / black-holed member must fail over, not hang the app.
+            this.readTimeoutMs = opts.readTimeoutMs != null ? opts.readTimeoutMs : 8000;
+            this.writeTimeoutMs = opts.writeTimeoutMs != null ? opts.writeTimeoutMs : 20000;
             // No member has budget → poll for a refill this long before a retry is spent.
             this.noEndpointWaitMs = opts.noEndpointWaitMs != null ? opts.noEndpointWaitMs : 2500;
             this.verbose = !!opts.verbose;
@@ -149,6 +152,10 @@ const patchSolanaConnection = (function () {
                 maxBatch: s.methodMaxBatch || null,
                 dailyQuota: !!s.dailyQuota,
                 consecutive429: 0,
+                // Reachability: some networks can't reach a member at all (ISP / firewall /
+                // ad-block / corporate proxy). A network-level failure parks it for a while,
+                // escalating on repeats, so traffic goes to members this visitor CAN reach.
+                unreachableUntil: 0, networkFailures: 0,
                 totalCalls: 0, totalErrors: 0,
             };
             this.endpoints.push(ep);
@@ -202,6 +209,7 @@ const patchSolanaConnection = (function () {
                 if (exclude && exclude[ep.url]) return false;
                 if (!self._methodEligible(ep, method, params)) return false;
                 if ((ep.methodBlock[method] || 0) > now) return false;
+                if (ep.unreachableUntil > now) return false;
                 const bucket = isWrite ? ep.write : ep.read;
                 if (bucket.rateLimitedUntil > now || bucket.tokens < 1) return false;
                 if (self._windowFull(ep, method, now)) return false;
@@ -215,6 +223,63 @@ const patchSolanaConnection = (function () {
                 return bt - at;
             });
             return available[0];
+        }
+
+        // fetch with a hard deadline. Races the timer as well as aborting, so even a
+        // fetch implementation that ignores AbortSignal can't hang the pool.
+        _timedFetch(url, init, timeoutMs) {
+            const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+            let timer;
+            const deadline = new Promise(function (_, reject) {
+                timer = setTimeout(function () {
+                    if (ctrl) { try { ctrl.abort(); } catch (e) { /* ignore */ } }
+                    reject(new Error('timeout after ' + timeoutMs + 'ms'));
+                }, timeoutMs);
+            });
+            const req = fetch(url, ctrl ? Object.assign({}, init, { signal: ctrl.signal }) : init);
+            return Promise.race([req, deadline]).finally(function () { clearTimeout(timer); });
+        }
+
+        // Network-level failure (blocked, CORS, DNS, timeout): park the member,
+        // 2 min -> 10 min -> 30 min on repeats; any success resets it.
+        _markUnreachable(ep, why) {
+            const ladder = [120000, 600000, 1800000];
+            ep.networkFailures++;
+            ep.unreachableUntil = Date.now() + ladder[Math.min(ep.networkFailures - 1, ladder.length - 1)];
+            if (this.verbose) console.log('[sol-rpc-pool] ' + ep.url + ' unreachable from here (' + why + '); parked ' + Math.round((ep.unreachableUntil - Date.now()) / 1000) + 's');
+        }
+
+        /**
+         * Connection check: one cheap getSlot to each member (or `urls`) with a
+         * short deadline. Unreachable members are parked before real traffic can
+         * stall on them. Resolves { [url]: true | false }. Members with a daily
+         * quota are skipped unless named explicitly.
+         */
+        async probe(urls, timeoutMs) {
+            const self = this;
+            const ms = timeoutMs || 4000;
+            const targets = this.endpoints.filter(function (ep) {
+                return urls ? urls.indexOf(ep.url) >= 0 : !ep.dailyQuota;
+            });
+            const out = {};
+            await Promise.all(targets.map(async function (ep) {
+                try {
+                    const res = await self._timedFetch(ep.url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSlot', params: [] }),
+                    }, ms);
+                    const ok = res.status === 200 || res.status === 429; // 429 = reachable, just busy
+                    if (!ok && (res.status === 401 || res.status === 403)) self._markUnreachable(ep, 'HTTP ' + res.status);
+                    if (ok) { ep.networkFailures = 0; ep.unreachableUntil = 0; }
+                    out[ep.url] = ok;
+                } catch (e) {
+                    self._markUnreachable(ep, ((e && e.message) || String(e)).slice(0, 60));
+                    out[ep.url] = false;
+                }
+            }));
+            this.lastProbe = { at: Date.now(), results: out };
+            return out;
         }
 
         // Provider-reported live numbers beat the spec (Foundation-style headers).
@@ -270,12 +335,13 @@ const patchSolanaConnection = (function () {
                 this._noteHit(ep, method, now);
                 ep.totalCalls++;
                 try {
-                    const res = await fetch(ep.url, {
+                    const res = await this._timedFetch(ep.url, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: method, params: params }),
-                    });
+                    }, isWrite ? this.writeTimeoutMs : this.readTimeoutMs);
                     const text = await res.text();
+                    ep.networkFailures = 0;
                     this._applyRateLimitHeaders(ep, method, res.headers, Date.now());
 
                     if (res.status === 429 || /rate limit|too many requests/i.test(text)) {
@@ -337,9 +403,11 @@ const patchSolanaConnection = (function () {
                 } catch (e) {
                     ep.totalErrors++;
                     const msg = (e && e.message) || String(e);
-                    if (/fetch|network|timeout|ECONN|ENOTFOUND|EAI_AGAIN|abort|CORS/i.test(msg)) {
+                    if (/fetch|network|timeout|ECONN|ENOTFOUND|EAI_AGAIN|abort|CORS|load failed/i.test(msg)) {
                         // A write that reached the wire may have landed — do not resend blindly.
-                        if (isWrite && attempt > 0) throw new Error('SolRpcPool: ' + method + ' failed on ' + ep.url + ' (' + msg.slice(0, 80) + ') — not resent, outcome indeterminate');
+                        // A TIMED-OUT write was certainly sent, so it is indeterminate on the first try.
+                        if (isWrite && (attempt > 0 || /timeout|abort/i.test(msg))) throw new Error('SolRpcPool: ' + method + ' failed on ' + ep.url + ' (' + msg.slice(0, 80) + ') — not resent, outcome indeterminate');
+                        this._markUnreachable(ep, msg.slice(0, 60));
                         tried[ep.url] = true;
                         if (this.verbose) console.log('[sol-rpc-pool] ' + ep.url + ' network error: ' + msg.slice(0, 80));
                         attempt++;
@@ -380,6 +448,8 @@ const patchSolanaConnection = (function () {
                     methodWindows: mw,
                     denied: ep.denylist || [],
                     consecutive429: ep.consecutive429,
+                    reachable: ep.unreachableUntil <= now,
+                    unreachableUntilMs: ep.unreachableUntil,
                     totalCalls: ep.totalCalls,
                     totalErrors: ep.totalErrors,
                 };
@@ -391,6 +461,14 @@ const patchSolanaConnection = (function () {
     // their generous bucket is full): set window.SOL_RPC_URLS before this loads.
     const extra = (typeof window !== 'undefined' && Array.isArray(window.SOL_RPC_URLS)) ? window.SOL_RPC_URLS.filter(function (u) { return typeof u === 'string' && /^https:\/\//.test(u); }) : [];
     const pool = new SolRpcPool(extra.concat(DEFAULT_URLS));
+    // Connection check at load: the two members that carry most traffic get one
+    // cheap getSlot, so a member this visitor's network blocks is parked before
+    // the first real call can stall on it. Quota-limited members are not probed.
+    if (typeof window !== 'undefined' && typeof fetch === 'function' && !window.SOL_RPC_NO_PROBE) {
+        setTimeout(function () {
+            pool.probe(['https://proofnetwork.lol/rpc', 'https://solana-rpc.publicnode.com'].concat(extra)).catch(function () {});
+        }, 0);
+    }
 
     // Expose the pool + class on window so DevTools / app.js / other scripts
     // can introspect rate-limit state (window.solRpcPool.getStats()) and so
