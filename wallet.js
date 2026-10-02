@@ -4874,7 +4874,21 @@ class CryptoClient {
                 --cc-skin-input: rgba(0, 0, 0, 0.28);
                 --cc-skin-danger-ink: #f97066;
             }
-            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode { --cc-accent: #0ea5e9; }
+            html[data-cc-wallet-theme] {
+                --cc-skin-privacy: #0ea5e9;           /* config.theme.privacyAccent */
+                --cc-skin-privacy-on: #ffffff;        /* text on it — config.theme.privacyInk */
+            }
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode {
+                --cc-accent: var(--cc-skin-privacy);
+                --cc-skin-accent-ink: var(--cc-skin-privacy-on);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-modal .cc-transfer-privacy-badge {
+                background: color-mix(in srgb, var(--cc-skin-privacy) 12%, transparent);
+                border-color: color-mix(in srgb, var(--cc-skin-privacy) 26%, transparent);
+                color: var(--cc-skin-privacy-ink);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-wallet-balance { color: var(--cc-skin-privacy-ink); }
+            html[data-cc-wallet-theme] .cc-transfer-modal .cc-transfer-privacy-badge svg { stroke: currentColor; }
 
             html[data-cc-wallet-theme] .cc-transfer-modal,
             html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode,
@@ -5106,6 +5120,12 @@ class CryptoClient {
                built with inline styles; every colour is written as
                var(--cc-skin-…, <classic value>), so these vars exist only under
                the skin and the classic sheet renders exactly as before. */
+            html[data-cc-wallet-theme] {
+                --cc-skin-privacy-fill: var(--cc-skin-privacy);
+                --cc-skin-privacy-glow: color-mix(in srgb, var(--cc-skin-privacy) 30%, transparent);
+                --cc-skin-privacy-tint: color-mix(in srgb, var(--cc-skin-privacy) 9%, transparent);
+                --cc-skin-privacy-line: color-mix(in srgb, var(--cc-skin-privacy) 24%, transparent);
+            }
             html[data-cc-wallet-theme="light"] {
                 --cc-skin-ink: #101828;
                 --cc-skin-ink-2: #475467;
@@ -5115,8 +5135,8 @@ class CryptoClient {
                 --cc-skin-hairline: #eff1f5;
                 --cc-skin-btn: #f2f3f7;
                 --cc-skin-privacy-surface: #ffffff;
-                --cc-skin-privacy-ink: #0369a1;
-                --cc-skin-privacy-link: #0284c7;
+                --cc-skin-privacy-ink: color-mix(in srgb, var(--cc-skin-privacy) 62%, #000);
+                --cc-skin-privacy-link: color-mix(in srgb, var(--cc-skin-privacy) 72%, #000);
             }
             html[data-cc-wallet-theme="dark"] {
                 --cc-skin-ink: #f2f3fa;
@@ -5126,9 +5146,9 @@ class CryptoClient {
                 --cc-skin-panel-2: rgba(255, 255, 255, 0.03);
                 --cc-skin-hairline: rgba(255, 255, 255, 0.07);
                 --cc-skin-btn: rgba(255, 255, 255, 0.09);
-                --cc-skin-privacy-surface: radial-gradient(120% 55% at 50% -8%, rgba(14, 165, 233, 0.16), transparent 60%), linear-gradient(180deg, #0c1219, #070b10);
-                --cc-skin-privacy-ink: #7dd3fc;
-                --cc-skin-privacy-link: #38bdf8;
+                --cc-skin-privacy-surface: radial-gradient(120% 55% at 50% -8%, color-mix(in srgb, var(--cc-skin-privacy) 16%, transparent), transparent 60%), linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo));
+                --cc-skin-privacy-ink: color-mix(in srgb, var(--cc-skin-privacy) 55%, #fff);
+                --cc-skin-privacy-link: color-mix(in srgb, var(--cc-skin-privacy) 80%, #fff);
             }
             html[data-cc-wallet-theme] .cc-modal-backdrop:not(#cc-wallet-modal) > .cc-modal {
                 font-family: var(--cc-skin-font);
@@ -5149,6 +5169,10 @@ class CryptoClient {
         root.setProperty('--cc-accent', t.accent || '#676fff');
         root.setProperty('--cc-primary', t.accent || '#676fff');
         if (t.accentInk) root.setProperty('--cc-skin-accent-ink', t.accentInk);
+        // privacy mode (window.privacyMode): sky blue unless the site picks its own colour
+        if (t.privacyAccent) root.setProperty('--cc-skin-privacy', t.privacyAccent);
+        const privacyInk = t.privacyInk || (t.privacyAccent ? t.accentInk : null);
+        if (privacyInk) root.setProperty('--cc-skin-privacy-on', privacyInk);
         if (t.font) root.setProperty('--cc-skin-font', t.font);
         if (t.vars && typeof t.vars === 'object') {
             for (const k of Object.keys(t.vars)) {
@@ -6809,18 +6833,18 @@ class CryptoClient {
 
         const modal = document.createElement('div');
         modal.className = 'cc-modal cc-privacy-success-modal';
-        modal.style.cssText = 'max-width: 440px; text-align: center; background: var(--cc-skin-privacy-surface, linear-gradient(180deg, #0a0f14 0%, #060a0d 100%)); border: 1px solid rgba(56, 189, 248, 0.2);';
+        modal.style.cssText = 'max-width: 440px; text-align: center; background: var(--cc-skin-privacy-surface, linear-gradient(180deg, #0a0f14 0%, #060a0d 100%)); border: 1px solid var(--cc-skin-privacy-line, rgba(56, 189, 248, 0.2));';
 
         // Shield icon (privacy theme)
         const iconContainer = document.createElement('div');
-        iconContainer.style.cssText = 'width: 64px; height: 64px; border-radius: 50%; background: linear-gradient(135deg, #0ea5e9, #0284c7); display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; box-shadow: 0 0 30px rgba(14, 165, 233, 0.3);';
+        iconContainer.style.cssText = 'width: 64px; height: 64px; border-radius: 50%; background: var(--cc-skin-privacy-fill, linear-gradient(135deg, #0ea5e9, #0284c7)); color: var(--cc-skin-privacy-on, #fff); display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; box-shadow: 0 0 30px var(--cc-skin-privacy-glow, rgba(14, 165, 233, 0.3));';
 
         const shieldIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         shieldIcon.setAttribute('width', '28');
         shieldIcon.setAttribute('height', '28');
         shieldIcon.setAttribute('viewBox', '0 0 24 24');
         shieldIcon.setAttribute('fill', 'none');
-        shieldIcon.setAttribute('stroke', '#fff');
+        shieldIcon.setAttribute('stroke', 'currentColor');
         shieldIcon.setAttribute('stroke-width', '2');
         shieldIcon.setAttribute('stroke-linecap', 'round');
         shieldIcon.setAttribute('stroke-linejoin', 'round');
@@ -6844,13 +6868,13 @@ class CryptoClient {
 
         // Subtitle badge
         const badge = document.createElement('div');
-        badge.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 20px; font-size: 11px; font-weight: 600; color: var(--cc-skin-privacy-ink, #7dd3fc); margin-bottom: 16px;';
+        badge.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; background: var(--cc-skin-privacy-tint, rgba(56, 189, 248, 0.12)); border: 1px solid var(--cc-skin-privacy-line, rgba(56, 189, 248, 0.2)); border-radius: 20px; font-size: 11px; font-weight: 600; color: var(--cc-skin-privacy-ink, #7dd3fc); margin-bottom: 16px;';
         badge.textContent = 'Via PrivacyCash';
         modal.appendChild(badge);
 
         // Deposit Section
         const depositSection = document.createElement('div');
-        depositSection.style.cssText = 'background: rgba(56, 189, 248, 0.06); border: 1px solid rgba(56, 189, 248, 0.12); border-radius: 12px; padding: 14px; margin-bottom: 12px; text-align: left;';
+        depositSection.style.cssText = 'background: var(--cc-skin-privacy-tint, rgba(56, 189, 248, 0.06)); border: 1px solid var(--cc-skin-privacy-line, rgba(56, 189, 248, 0.12)); border-radius: 12px; padding: 14px; margin-bottom: 12px; text-align: left;';
 
         const depositHeader = document.createElement('div');
         depositHeader.style.cssText = 'font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--cc-skin-ink-3, rgba(255,255,255,0.4)); margin-bottom: 10px;';
@@ -6960,7 +6984,7 @@ class CryptoClient {
 
         // Close button
         const closeBtn = document.createElement('button');
-        closeBtn.style.cssText = 'width: 100%; padding: 14px; border-radius: 12px; border: none; background: linear-gradient(135deg, #0ea5e9, #0284c7); color: #fff; cursor: pointer; font-weight: 600; font-size: 14px; box-shadow: 0 4px 16px rgba(14, 165, 233, 0.3);';
+        closeBtn.style.cssText = 'width: 100%; padding: 14px; border-radius: 12px; border: none; background: var(--cc-skin-privacy-fill, linear-gradient(135deg, #0ea5e9, #0284c7)); color: var(--cc-skin-privacy-on, #fff); cursor: pointer; font-weight: 600; font-size: 14px; box-shadow: 0 4px 16px var(--cc-skin-privacy-glow, rgba(14, 165, 233, 0.3));';
         closeBtn.textContent = 'Done';
         closeBtn.addEventListener('click', () => overlay.remove());
         modal.appendChild(closeBtn);

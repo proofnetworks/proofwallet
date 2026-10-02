@@ -78,6 +78,8 @@ new CryptoClient({
     mode:          'light' | 'dark', // First-visit theme (privy skin); the in-dialog toggle persists after
     accent:        string,      // Primary-action colour — any CSS colour or var(); default: '#676fff'
     accentInk:     string,      // Text colour on the accent — default: '#ffffff' (use a dark ink on light accents)
+    privacyAccent: string,      // Privacy-mode colour (Private Transfer sheet + receipt) — default: '#0ea5e9' sky
+    privacyInk:    string,      // Text on privacyAccent — default: accentInk when privacyAccent is set, else '#ffffff'
     font:          string,      // font-family stack for the overlay
     vars:          object,      // Raw CSS-variable overrides, e.g. { '--cc-skin-dark-hi': '#141418' }
     primaryColor:  string,      // classic skin — default: '#10b981'
@@ -98,6 +100,7 @@ new CryptoClient({
     mode:      'dark',
     accent:    '#f5a623',
     accentInk: '#0b0b0f',              // amber is light — dark text reads better on it
+    privacyAccent: '#f5a623',          // privacy mode always on here — keep it amber instead of sky
     font:      "'DM Sans', sans-serif",
     vars: { '--cc-skin-dark-hi': '#141418', '--cc-skin-dark-lo': '#0c0c0f' }, // warm the dark surface
   },
