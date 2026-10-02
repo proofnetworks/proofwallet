@@ -17,6 +17,7 @@ If you're building a UI for a ProofNetwork contract — game, marketplace, DAO, 
 - **Privacy mode** — `window.privacyMode = true` routes transfers through PrivacyCash and restricts the wallet picker to burners
 - **Polling** — `pollContract(fn, …, frequency, onUpdate)` for view functions with an automatic error budget
 - **Drop-in UI** — auto-rendered Connect button, wallet-selection modal, toasts, result modals
+- **Privy-style skin** — a compact light/dark dialog (bottom sheet on phones) with your logo, one accent colour, a persisted theme toggle and a connect confirmation; `skin: 'classic'` keeps the original dark sheet
 
 ---
 
@@ -70,12 +71,42 @@ new CryptoClient({
   appName:         string,      // Shown in modal headers
   mountTo:         string | Element, // CSS selector / DOM node for the auto-rendered Connect button
   onVerify:        async (publicKey) => boolean, // Optional connection gate — return false to refuse
+  skin:            'privy' | 'classic', // Overlay look — default: 'privy'
+  icon:            string,      // Logo URL shown above "Connect Wallet" (privy skin)
+  brand:           string | false, // Footer "Protected by <brand>" — default: 'ProofNetwork'; false hides it
   theme: {
-    primaryColor:  string,      // default: '#10b981'
-    accentColor:   string,      // default: '#34d399'
+    mode:          'light' | 'dark', // First-visit theme (privy skin); the in-dialog toggle persists after
+    accent:        string,      // Primary-action colour — any CSS colour or var(); default: '#676fff'
+    accentInk:     string,      // Text colour on the accent — default: '#ffffff' (use a dark ink on light accents)
+    font:          string,      // font-family stack for the overlay
+    vars:          object,      // Raw CSS-variable overrides, e.g. { '--cc-skin-dark-hi': '#141418' }
+    primaryColor:  string,      // classic skin — default: '#10b981'
+    accentColor:   string,      // classic skin — default: '#34d399'
   },
 });
 ```
+
+### Theming the overlay
+
+The default **privy** skin draws a compact centered dialog (a bottom sheet under 700px wide) with individually bordered rows, your logo, a "current wallet" strip in the burner manager and a spinner → check confirmation when a wallet connects. Everything takes the one `theme.accent` colour, and every sub-view (burner manager, transfer, bulk buy) follows light/dark.
+
+```javascript
+new CryptoClient({
+  appName: 'Avina',
+  icon:    'favicon.svg',
+  theme: {
+    mode:      'dark',
+    accent:    '#f5a623',
+    accentInk: '#0b0b0f',              // amber is light — dark text reads better on it
+    font:      "'DM Sans', sans-serif",
+    vars: { '--cc-skin-dark-hi': '#141418', '--cc-skin-dark-lo': '#0c0c0f' }, // warm the dark surface
+  },
+});
+
+wallet.setWalletTheme('light');        // switch programmatically (persisted in localStorage 'cc-wallet-theme')
+```
+
+The theme is set as `html[data-cc-wallet-theme="light" | "dark"]`, so page CSS can key off it too.
 
 `contractAddress` is the contract your UI primarily talks to (used as the default by `callContract`/`pollContract`). You can still call other contracts by passing `options.contractAddress` per call if you build a multi-contract app.
 
@@ -496,9 +527,11 @@ Backed by DexScreener. Cache for at least 30 s — don't poll on every tick.
 
 ## RPC routing
 
-`CryptoClient.SYNDICA_RPC` is a **getter**, not a constant. It calls `window.solRpcPool.pickUrl()` each access, so every read flows through whichever endpoint the pool decides is healthiest right now (rate-limit-aware). If `solRpcPool` isn't loaded, it falls back to `api.mainnet-beta.solana.com`.
+`CryptoClient.SYNDICA_RPC` is a **getter**, not a constant. It calls `window.solRpcPool.pickUrl()` each access, so every read flows through whichever endpoint the pool decides is healthiest right now (rate-limit-aware). If `solRpcPool` isn't loaded, it falls back to `https://proofnetwork.lol/rpc`.
 
-The actual per-request routing happens via a patched `Connection.prototype._rpcRequest`, so any `new solanaWeb3.Connection(...)` you create inherits pool routing too. You almost never need to set an RPC URL manually — and you shouldn't.
+The actual per-request routing happens by wrapping `solanaWeb3.Connection`, so any `new solanaWeb3.Connection(...)` you create inherits pool routing too. (web3.js assigns `_rpcRequest` per instance, so patching only the prototype would silently do nothing.) You almost never need to set an RPC URL manually — and you shouldn't.
+
+Pool members, in order: **ProofNetwork's RPC proxy** (`proofnetwork.lol/rpc` — the server's keyed pool with caching, 100 burst / 50 rps per IP), then the keyless fallbacks **publicnode**, **QuickNode docs-demo** and **LeoRPC FREE**. `api.mainnet-beta.solana.com` answers 403 to any browser Origin, so it is not a member. A site with its own keyed RPC can put it first with `window.SOL_RPC_URLS = ['https://…']` before `wallet.js` loads, or `window.solRpcPool.addEndpoint(url, spec)` at runtime. `window.solRpcPool.getStats()` shows tokens, cooldowns and denied methods per member.
 
 ---
 
@@ -716,7 +749,7 @@ Returning `false` cancels the connection and shows the user a denial toast.
 
 ## Browser requirements
 
-- Modern browser with ES6+ support
+- Modern browser with ES6+ support (the privy skin uses `color-mix()`: Safari 16.2+, Chrome 111+, Firefox 113+)
 - `localStorage` for burner wallet storage
 - `crypto.getRandomValues()` for key generation
 - WebSocket support for RPC + realtime

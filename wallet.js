@@ -1,78 +1,161 @@
 // ════════════════════════════════════════════════════════════════════════════
-// Inline browser-side SolRpcPool — token-bucket rate limiting against the
-// 4 verified free public Solana RPC endpoints. Server mirror lives at
-// src/sol-rpc-pool.ts with the same EMPIRICAL_SPECS table and routing logic.
+// Inline browser-side SolRpcPool — token-bucket + per-method-window rate
+// limiting against the keyless public Solana RPC endpoints a BROWSER can use.
+// Server mirror: proofnetwork/server/services/sol-rpc-pool.ts (same spec
+// shape; the numbers here are the browser-relevant subset).
 //
-// Each browser tab is a separate IP from each provider's perspective, so
-// every user gets their own per-provider rate-limit budget — far better
-// than proxying through one server-side pool where all users would share
-// a single upstream IP bucket.
+// Each browser tab is its own IP from a provider's perspective, so every user
+// gets their own per-provider budget — better than funnelling through one
+// server IP. But the browser ALSO has constraints the server does not:
+//   • the request carries an Origin header → the endpoint must answer CORS;
+//   • no API keys can be embedded (the page is public).
 //
-// Empirically-derived specs (read = paced getSlot test, write = paced
-// sendTransaction test, 2026-05-15). See scripts/stress-sol-rpcs-{hard,
-// sustained,sendtx}.ts for the methodology + raw numbers.
+// LIMITS REFRESHED 2026-09-03 from the server pool's probes + live 429 logs:
+//   ☠ 'https://api.mainnet-beta.solana.com' REMOVED — the Foundation RPC
+//     answers HTTP 403 {"error":{"code":403,"message":"Access forbidden"}} to
+//     ANY request carrying a browser Origin header (verified for
+//     proofnetwork.lol, *.workers.dev, localhost). Server-to-server it works
+//     (10 calls / 10 s PER METHOD, 100 / 10 s per IP) — from a page it never
+//     did; every tab burned a retry on it and parked it for an hour.
+//   ☠ 'https://api.tatum.io/v3/blockchain/node/solana-mainnet' REMOVED —
+//     anonymous bucket is ~4-5 calls / MINUTE and shared across the caller's
+//     network neighbourhood; the old spec (30 burst, 0.5/s) was ~10× reality.
+//   ☠ 'https://solana.lava.build' REMOVED 2026-08-29 — discontinued.
+//   • publicnode: 200 burst / 30 rps reads, 200 / 10 rps writes, CORS *.
+//     getTokenAccountsByOwner is DENIED (it silently omits accounts — see the
+//     flux-owner-index landmine); getMultipleAccounts ≤ 10 keys per call.
+//   • QuickNode docs-demo: 3 rps reads, CORS (echoes Origin), NO writes, a
+//     DAILY quota (a 429 mentioning the plan/quota parks it until UTC
+//     midnight), denies getMultipleAccounts / getBlockHeight / getEpochInfo /
+//     getProgramAccounts / sendTransaction.
+//   • LeoRPC FREE: 1 rps reads, CORS *, NO writes, denies getMultipleAccounts
+//     / getEpochInfo / getProgramAccounts / sendTransaction.
+//   ⇒ publicnode is the ONLY keyless browser write path. A site with its own
+//     keyed RPC should add it: `window.SOL_RPC_URLS = ['https://…key…']`
+//     BEFORE wallet.js loads (joins first, generous default budget), or
+//     `window.solRpcPool.addEndpoint(url, spec)` at runtime.
 //
 // `patchSolanaConnection(solanaWeb3)` monkey-patches
 // Connection.prototype._rpcRequest so every existing/new Connection routes
-// through this pool. WebSocket subscriptions (onAccountChange etc.) are
-// NOT covered — those go through a different web3.js code path.
+// through this pool. WebSocket subscriptions (onAccountChange etc.) are NOT
+// covered — those go through a different web3.js code path.
 // ════════════════════════════════════════════════════════════════════════════
 const patchSolanaConnection = (function () {
     'use strict';
 
+    // spec shape (mirrors the server's EndpointSpec):
+    //   read/write: { burst, refillPerSec }  token buckets per method class
+    //   window:      { max, ms }              per-IP sliding cap, all methods
+    //   methodWindows: { [method|'*']: { max, ms } }  per-METHOD sliding caps
+    //   methodDenylist / methodAllowlist    routing eligibility
+    //   methodMaxBatch: { [method]: n }      skip when params[0].length > n
+    //   dailyQuota: true                     a plan/quota 429 parks to UTC midnight
     const EMPIRICAL_SPECS = {
-        // ☠ 'https://solana.lava.build' REMOVED 2026-08-29 — DISCONTINUED. It now
-        // answers every method with HTTP 200 + {"error":"This endpoint has been
-        // discontinued.","message":"…"} — a BARE STRING `error`, not a JSON-RPC
-        // envelope. It also held the largest write bucket here (200/+10s), so it
-        // won most sendTransaction picks and broke sends outright. Do NOT re-add.
+        // ProofNetwork's own JSON-RPC proxy (server/services/rpc-proxy.ts): the
+        // SERVER's pool (Foundation + keyed members) with a result cache and
+        // in-flight dedup, behind a per-IP budget of 100 burst / 50 rps. First
+        // member: it is the only way a page reaches api.mainnet-beta at all.
+        'https://proofnetwork.lol/rpc': {
+            read: { burst: 100, refillPerSec: 50 },
+            write: { burst: 50, refillPerSec: 10 },
+            rank: 0,
+        },
         'https://solana-rpc.publicnode.com': {
             read: { burst: 200, refillPerSec: 30 },
             write: { burst: 200, refillPerSec: 10 },
+            methodDenylist: ['getTokenAccountsByOwner'],
+            methodMaxBatch: { getMultipleAccounts: 10 },
         },
+        'https://docs-demo.solana-mainnet.quiknode.pro': {
+            read: { burst: 3, refillPerSec: 3 },
+            write: { burst: 0, refillPerSec: 0 },
+            dailyQuota: true,
+            methodDenylist: ['getMultipleAccounts', 'getBlockHeight', 'getEpochInfo', 'getProgramAccounts', 'sendTransaction', 'requestAirdrop'],
+            methodMaxBatch: { getSignatureStatuses: 190 },
+        },
+        'https://solana.leorpc.com/?api_key=FREE': {
+            read: { burst: 1, refillPerSec: 1 },
+            write: { burst: 0, refillPerSec: 0 },
+            methodDenylist: ['getMultipleAccounts', 'getEpochInfo', 'getProgramAccounts', 'sendTransaction', 'requestAirdrop'],
+        },
+        // Tombstones — kept so a stale DEFAULT_URLS override cannot re-enable
+        // them with a generous FALLBACK_SPEC. Do NOT route to these from a page.
         'https://api.mainnet-beta.solana.com': {
-            read: { burst: 40, refillPerSec: 4 },
-            write: { burst: 20, refillPerSec: 2 },
+            read: { burst: 0, refillPerSec: 0 }, write: { burst: 0, refillPerSec: 0 },
+            browserBlocked: '403 Access forbidden for any Origin (2026-09-03)',
         },
         'https://api.tatum.io/v3/blockchain/node/solana-mainnet': {
-            read: { burst: 30, refillPerSec: 0.5 },
-            write: { burst: 5, refillPerSec: 0.1 },
+            read: { burst: 0, refillPerSec: 0 }, write: { burst: 0, refillPerSec: 0 },
+            browserBlocked: 'anonymous bucket ~4/min, shared per network (2026-09-02)',
+        },
+        'https://solana.lava.build': {
+            read: { burst: 0, refillPerSec: 0 }, write: { burst: 0, refillPerSec: 0 },
+            browserBlocked: 'discontinued (2026-08-29)',
         },
     };
 
-    const FALLBACK_SPEC = { read: { burst: 20, refillPerSec: 10 }, write: { burst: 10, refillPerSec: 2 } };
+    // Unknown URL (a site's own keyed RPC): paid-tier shaped, the 429 handling
+    // below degrades it gracefully if the real tier is lower.
+    const FALLBACK_SPEC = { read: { burst: 100, refillPerSec: 50 }, write: { burst: 50, refillPerSec: 10 } };
 
     const DEFAULT_URLS = [
-        // lava.build removed 2026-08-29 (discontinued) — see EMPIRICAL_SPECS above.
+        'https://proofnetwork.lol/rpc',
         'https://solana-rpc.publicnode.com',
-        'https://api.mainnet-beta.solana.com',
-        'https://api.tatum.io/v3/blockchain/node/solana-mainnet',
+        'https://docs-demo.solana-mainnet.quiknode.pro',
+        'https://solana.leorpc.com/?api_key=FREE',
     ];
 
     function isWriteMethod(method) {
         return method === 'sendTransaction' || method === 'requestAirdrop';
+    }
+    function nextUtcMidnight(now) {
+        const d = new Date(now);
+        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
     }
 
     class SolRpcPool {
         constructor(urls, opts) {
             opts = opts || {};
             if (!urls || !urls.length) throw new Error('SolRpcPool needs at least one URL');
-            const specOverrides = Object.assign({}, EMPIRICAL_SPECS, opts.specs || {});
-            const now = Date.now();
-            this.endpoints = urls.map(function (url) {
-                const spec = specOverrides[url] || FALLBACK_SPEC;
-                return {
-                    url: url,
-                    readSpec: spec.read,
-                    writeSpec: spec.write,
-                    read: { tokens: spec.read.burst, lastRefillMs: now, rateLimitedUntil: 0 },
-                    write: { tokens: spec.write.burst, lastRefillMs: now, rateLimitedUntil: 0 },
-                    totalCalls: 0,
-                    totalErrors: 0,
-                };
-            });
-            this.maxRetries = opts.maxRetries != null ? opts.maxRetries : 3;
+            this.specs = Object.assign({}, EMPIRICAL_SPECS, opts.specs || {});
+            this.endpoints = [];
+            for (let i = 0; i < urls.length; i++) this.addEndpoint(urls[i]);
+            this.maxRetries = opts.maxRetries != null ? opts.maxRetries : 4;
+            // No member has budget → poll for a refill this long before a retry is spent.
+            this.noEndpointWaitMs = opts.noEndpointWaitMs != null ? opts.noEndpointWaitMs : 2500;
             this.verbose = !!opts.verbose;
+        }
+
+        // Add (or replace) a member at runtime. `spec` optional — a known URL
+        // uses its EMPIRICAL_SPECS entry, an unknown one the FALLBACK_SPEC.
+        addEndpoint(url, spec) {
+            const s = spec || this.specs[url] || FALLBACK_SPEC;
+            if (s.browserBlocked) {
+                if (this.verbose) console.log('[sol-rpc-pool] refusing ' + url + ': ' + s.browserBlocked);
+                return null;
+            }
+            this.removeEndpoint(url);
+            const now = Date.now();
+            const ep = {
+                url: url,
+                readSpec: s.read, writeSpec: s.write,
+                read: { tokens: s.read.burst, lastRefillMs: now, rateLimitedUntil: 0 },
+                write: { tokens: s.write.burst, lastRefillMs: now, rateLimitedUntil: 0 },
+                rank: s.rank != null ? s.rank : 1,
+                windowSpec: s.window || null, windowHits: [],
+                methodWindows: s.methodWindows || null, methodHits: {},
+                methodBlock: {},                       // method → until ms (header / 429 says "not this method")
+                denylist: s.methodDenylist || null, allowlist: s.methodAllowlist || null,
+                maxBatch: s.methodMaxBatch || null,
+                dailyQuota: !!s.dailyQuota,
+                consecutive429: 0,
+                totalCalls: 0, totalErrors: 0,
+            };
+            this.endpoints.push(ep);
+            return ep;
+        }
+        removeEndpoint(url) {
+            this.endpoints = this.endpoints.filter(function (ep) { return ep.url !== url; });
         }
 
         _refillBucket(spec, bucket, now) {
@@ -82,21 +165,51 @@ const patchSolanaConnection = (function () {
                 bucket.lastRefillMs = now;
             }
         }
-
         _refillAll(ep, now) {
             this._refillBucket(ep.readSpec, ep.read, now);
             this._refillBucket(ep.writeSpec, ep.write, now);
         }
+        _prune(hits, cutoff) { while (hits.length && hits[0] <= cutoff) hits.shift(); return hits.length; }
+        _methodWindowSpec(ep, method) {
+            if (!ep.methodWindows) return null;
+            return ep.methodWindows[method] || ep.methodWindows['*'] || null;
+        }
+        _windowFull(ep, method, now) {
+            if (ep.windowSpec && this._prune(ep.windowHits, now - ep.windowSpec.ms) >= ep.windowSpec.max) return true;
+            const mw = this._methodWindowSpec(ep, method);
+            if (mw) {
+                const hits = ep.methodHits[method] || (ep.methodHits[method] = []);
+                if (this._prune(hits, now - mw.ms) >= mw.max) return true;
+            }
+            return false;
+        }
+        _noteHit(ep, method, now) {
+            if (ep.windowSpec) ep.windowHits.push(now);
+            if (this._methodWindowSpec(ep, method)) (ep.methodHits[method] || (ep.methodHits[method] = [])).push(now);
+        }
+        _methodEligible(ep, method, params) {
+            if (ep.allowlist && ep.allowlist.indexOf(method) < 0) return false;
+            if (ep.denylist && ep.denylist.indexOf(method) >= 0) return false;
+            if (ep.maxBatch && ep.maxBatch[method] != null && params && Array.isArray(params[0]) && params[0].length > ep.maxBatch[method]) return false;
+            return true;
+        }
 
-        _pickEndpoint(method, now) {
+        _pickEndpoint(method, now, params, exclude) {
             const isWrite = isWriteMethod(method);
             for (let i = 0; i < this.endpoints.length; i++) this._refillAll(this.endpoints[i], now);
+            const self = this;
             const available = this.endpoints.filter(function (ep) {
+                if (exclude && exclude[ep.url]) return false;
+                if (!self._methodEligible(ep, method, params)) return false;
+                if ((ep.methodBlock[method] || 0) > now) return false;
                 const bucket = isWrite ? ep.write : ep.read;
-                return bucket.rateLimitedUntil <= now && bucket.tokens >= 1;
+                if (bucket.rateLimitedUntil > now || bucket.tokens < 1) return false;
+                if (self._windowFull(ep, method, now)) return false;
+                return true;
             });
             if (!available.length) return null;
             available.sort(function (a, b) {
+                if (a.rank !== b.rank) return a.rank - b.rank;   // explicit preference first (proxy = 0)
                 const at = isWrite ? a.write.tokens : a.read.tokens;
                 const bt = isWrite ? b.write.tokens : b.read.tokens;
                 return bt - at;
@@ -104,21 +217,57 @@ const patchSolanaConnection = (function () {
             return available[0];
         }
 
+        // Provider-reported live numbers beat the spec (Foundation-style headers).
+        _applyRateLimitHeaders(ep, method, headers, now) {
+            if (!headers || typeof headers.get !== 'function') return;
+            const num = function (h) { if (h == null) return null; const n = parseInt(h, 10); return isNaN(n) ? null : n; };
+            const methodLeft = num(headers.get('x-ratelimit-method-remaining'));
+            if (methodLeft != null && methodLeft <= 0) ep.methodBlock[method] = Math.max(ep.methodBlock[method] || 0, now + 1100);
+            const rpsLeft = num(headers.get('x-ratelimit-rps-remaining'));
+            if (rpsLeft != null && rpsLeft <= 0) {
+                ep.read.rateLimitedUntil = Math.max(ep.read.rateLimitedUntil, now + 1100);
+                ep.write.rateLimitedUntil = Math.max(ep.write.rateLimitedUntil, now + 1100);
+            }
+        }
+
+        _cooldownFor429(ep, method, res, text, now) {
+            const retryAfter = res && res.headers && typeof res.headers.get === 'function' ? parseInt(res.headers.get('retry-after') || '', 10) : NaN;
+            // Daily / plan quota (QuickNode docs-demo): nothing refills before midnight UTC.
+            if (ep.dailyQuota && /daily|quota|plan|monthly|credits/i.test(text || '')) {
+                return { untilMs: nextUtcMidnight(now), reason: 'daily quota' };
+            }
+            if (!isNaN(retryAfter) && retryAfter > 0) return { untilMs: now + Math.min(300000, Math.max(1000, retryAfter * 1000)), reason: 'Retry-After ' + retryAfter + 's' };
+            // Escalating ladder for a bare 429: 5s → 15s → 60s → 5m.
+            const ladder = [5000, 15000, 60000, 300000];
+            return { untilMs: now + ladder[Math.min(ep.consecutive429, ladder.length - 1)], reason: 'bare 429 #' + (ep.consecutive429 + 1) };
+        }
+
         async send(method, params) {
             params = params || [];
             const isWrite = isWriteMethod(method);
+            const tried = {};
             let attempt = 0;
             while (attempt < this.maxRetries) {
-                const now = Date.now();
-                const ep = this._pickEndpoint(method, now);
+                let now = Date.now();
+                let ep = this._pickEndpoint(method, now, params, tried);
                 if (!ep) {
-                    if (this.verbose) console.log('[sol-rpc-pool] no endpoint available for ' + method + '; waiting 200ms');
-                    await new Promise(function (r) { setTimeout(r, 200); });
-                    attempt++;
-                    continue;
+                    // Wait for a refill (100 ms polls) before spending a retry.
+                    const deadline = now + this.noEndpointWaitMs;
+                    while (!ep && Date.now() < deadline) {
+                        await new Promise(function (r) { setTimeout(r, 100); });
+                        now = Date.now();
+                        ep = this._pickEndpoint(method, now, params, tried);
+                    }
+                    if (!ep) {
+                        if (Object.keys(tried).length && Object.keys(tried).length >= this.endpoints.length) break; // every member errored
+                        if (this.verbose) console.log('[sol-rpc-pool] no endpoint had budget for ' + method + ' within ' + this.noEndpointWaitMs + 'ms');
+                        attempt++;
+                        continue;
+                    }
                 }
                 const bucket = isWrite ? ep.write : ep.read;
                 bucket.tokens -= 1;
+                this._noteHit(ep, method, now);
                 ep.totalCalls++;
                 try {
                     const res = await fetch(ep.url, {
@@ -127,29 +276,28 @@ const patchSolanaConnection = (function () {
                         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: method, params: params }),
                     });
                     const text = await res.text();
+                    this._applyRateLimitHeaders(ep, method, res.headers, Date.now());
 
                     if (res.status === 429 || /rate limit|too many requests/i.test(text)) {
-                        const retryAfterHeader = res.headers.get('retry-after');
-                        let cooldownMs = 60000;
-                        if (retryAfterHeader) {
-                            const asInt = parseInt(retryAfterHeader, 10);
-                            if (!isNaN(asInt) && asInt > 0) cooldownMs = Math.min(300000, Math.max(5000, asInt * 1000));
-                        }
+                        const cd = this._cooldownFor429(ep, method, res, text, Date.now());
+                        ep.consecutive429++;
                         bucket.tokens = 0;
-                        bucket.rateLimitedUntil = Date.now() + cooldownMs;
+                        bucket.rateLimitedUntil = cd.untilMs;
                         ep.totalErrors++;
-                        if (this.verbose) console.log('[sol-rpc-pool] ' + ep.url + ' ' + (isWrite ? 'write' : 'read') + '-bucket rate-limited; cooling ' + cooldownMs / 1000 + 's');
+                        tried[ep.url] = true;
+                        if (this.verbose) console.log('[sol-rpc-pool] ' + ep.url + ' ' + (isWrite ? 'write' : 'read') + ' rate-limited (' + cd.reason + '); cooling ' + Math.round((cd.untilMs - Date.now()) / 1000) + 's');
                         attempt++;
                         continue;
                     }
+                    ep.consecutive429 = 0;
 
-                    if (res.status === 401 || res.status === 403 || /unauthorized|api[- ]?key|authenticate/i.test(text)) {
-                        ep.read.tokens = 0;
-                        ep.write.tokens = 0;
+                    if (res.status === 401 || res.status === 403 || /unauthorized|api[- ]?key|authenticate|access forbidden/i.test(text)) {
+                        ep.read.tokens = 0; ep.write.tokens = 0;
                         ep.read.rateLimitedUntil = Date.now() + 3600000;
                         ep.write.rateLimitedUntil = Date.now() + 3600000;
                         ep.totalErrors++;
-                        if (this.verbose) console.log('[sol-rpc-pool] ' + ep.url + ' requires API key; disabled for 1 hour');
+                        tried[ep.url] = true;
+                        if (this.verbose) console.log('[sol-rpc-pool] ' + ep.url + ' refused (' + res.status + ' / auth or origin); disabled for 1 hour');
                         attempt++;
                         continue;
                     }
@@ -158,12 +306,9 @@ const patchSolanaConnection = (function () {
                     try { json = JSON.parse(text); }
                     catch (e) { ep.totalErrors++; throw new Error('Non-JSON response from ' + ep.url + ': ' + text.slice(0, 200)); }
                     // Valid JSON that is NOT a JSON-RPC envelope => this endpoint is
-                    // broken or decommissioned. lava.build did exactly this once
-                    // retired: HTTP 200 with a BARE STRING `error`, so the check
-                    // below reads json.error.message as undefined and the call died
-                    // terminally with no failover. A non-JSON-RPC reply proves the
-                    // request was never processed as one — nothing was sent — so it
-                    // is safe to park the endpoint and try the next, even for a write.
+                    // broken or decommissioned (lava.build did exactly this once
+                    // retired: HTTP 200 with a BARE STRING `error`). Nothing was
+                    // processed as a request, so failing over is safe even for a write.
                     const rpcEnvelope = json && typeof json === 'object' && !Array.isArray(json) &&
                         (Object.prototype.hasOwnProperty.call(json, 'result') ||
                          (json.error !== null && typeof json.error === 'object'));
@@ -171,19 +316,31 @@ const patchSolanaConnection = (function () {
                         ep.totalErrors++;
                         ep.read.rateLimitedUntil = Date.now() + 1800000;
                         ep.write.rateLimitedUntil = Date.now() + 1800000;
+                        tried[ep.url] = true;
                         if (this.verbose) console.log('[sol-rpc-pool] ' + ep.url + ' returned a non-JSON-RPC body (endpoint broken/decommissioned); parking 30m and failing over');
                         attempt++;
                         continue;
                     }
                     if (json.error) {
                         ep.totalErrors++;
+                        // "Method not found / not supported" on a member = routing fact, not a call error:
+                        // deny it here from now on and fail over (reads only — a write is never blindly resent).
+                        if (!isWrite && json.error.code === -32601) {
+                            ep.denylist = (ep.denylist || []).concat([method]);
+                            tried[ep.url] = true;
+                            attempt++;
+                            continue;
+                        }
                         throw new Error(ep.url + ' error: ' + (json.error.message || JSON.stringify(json.error)));
                     }
                     return json.result;
                 } catch (e) {
                     ep.totalErrors++;
                     const msg = (e && e.message) || String(e);
-                    if (/fetch|network|timeout|ECONN|ENOTFOUND|EAI_AGAIN|abort/i.test(msg)) {
+                    if (/fetch|network|timeout|ECONN|ENOTFOUND|EAI_AGAIN|abort|CORS/i.test(msg)) {
+                        // A write that reached the wire may have landed — do not resend blindly.
+                        if (isWrite && attempt > 0) throw new Error('SolRpcPool: ' + method + ' failed on ' + ep.url + ' (' + msg.slice(0, 80) + ') — not resent, outcome indeterminate');
+                        tried[ep.url] = true;
                         if (this.verbose) console.log('[sol-rpc-pool] ' + ep.url + ' network error: ' + msg.slice(0, 80));
                         attempt++;
                         continue;
@@ -191,7 +348,7 @@ const patchSolanaConnection = (function () {
                     throw e;
                 }
             }
-            throw new Error('SolRpcPool: all ' + this.maxRetries + ' retries exhausted for ' + method);
+            throw new Error('SolRpcPool: no endpoint could serve ' + method + ' (' + attempt + ' attempts across ' + this.endpoints.length + ' members)');
         }
 
         // Public URL picker. Asks the pool which endpoint it would actually serve
@@ -213,10 +370,16 @@ const patchSolanaConnection = (function () {
             const self = this;
             return this.endpoints.map(function (ep) {
                 self._refillAll(ep, now);
+                const mw = {};
+                for (const m in ep.methodHits) { const spec = self._methodWindowSpec(ep, m); if (spec) mw[m] = { used: self._prune(ep.methodHits[m], now - spec.ms), max: spec.max, ms: spec.ms }; }
                 return {
                     url: ep.url,
                     read: { tokens: Math.round(ep.read.tokens * 10) / 10, burst: ep.readSpec.burst, refillPerSec: ep.readSpec.refillPerSec, rateLimitedUntilMs: ep.read.rateLimitedUntil },
                     write: { tokens: Math.round(ep.write.tokens * 10) / 10, burst: ep.writeSpec.burst, refillPerSec: ep.writeSpec.refillPerSec, rateLimitedUntilMs: ep.write.rateLimitedUntil },
+                    window: ep.windowSpec ? { used: self._prune(ep.windowHits, now - ep.windowSpec.ms), max: ep.windowSpec.max, ms: ep.windowSpec.ms } : null,
+                    methodWindows: mw,
+                    denied: ep.denylist || [],
+                    consecutive429: ep.consecutive429,
                     totalCalls: ep.totalCalls,
                     totalErrors: ep.totalErrors,
                 };
@@ -224,13 +387,18 @@ const patchSolanaConnection = (function () {
         }
     }
 
-    const pool = new SolRpcPool(DEFAULT_URLS);
+    // A site's own keyed RPC(s) join FIRST (preferred by the token sort while
+    // their generous bucket is full): set window.SOL_RPC_URLS before this loads.
+    const extra = (typeof window !== 'undefined' && Array.isArray(window.SOL_RPC_URLS)) ? window.SOL_RPC_URLS.filter(function (u) { return typeof u === 'string' && /^https:\/\//.test(u); }) : [];
+    const pool = new SolRpcPool(extra.concat(DEFAULT_URLS));
 
     // Expose the pool + class on window so DevTools / app.js / other scripts
     // can introspect rate-limit state (window.solRpcPool.getStats()) and so
     // anyone embedding wallet.js elsewhere can read the same instance.
-    window.solRpcPool = pool;
-    window.SolRpcPool = SolRpcPool;
+    if (typeof window !== 'undefined') {
+        window.solRpcPool = pool;
+        window.SolRpcPool = SolRpcPool;
+    }
 
     return function patchSolanaConnection(solanaWeb3) {
         if (!solanaWeb3 || !solanaWeb3.Connection) {
@@ -239,16 +407,44 @@ const patchSolanaConnection = (function () {
         }
         const Connection = solanaWeb3.Connection;
         if (Connection.prototype.__solRpcPoolPatched) return true;
-        Connection.prototype._rpcRequest = async function (method, args) {
+        // web3.js validates the envelope with `id: string()` — a numeric id
+        // fails its StructError union check.
+        const poolRequest = async function (method, args) {
             try {
                 const result = await pool.send(method, args || []);
-                return { jsonrpc: '2.0', id: 1, result: result };
+                return { jsonrpc: '2.0', id: '1', result: result };
             } catch (e) {
-                return { jsonrpc: '2.0', id: 1, error: { code: -32000, message: (e && e.message) || String(e) } };
+                return { jsonrpc: '2.0', id: '1', error: { code: -32000, message: (e && e.message) || String(e) } };
             }
         };
+        // web3.js assigns `this._rpcRequest` PER INSTANCE in the Connection
+        // constructor, which shadows anything on the prototype — a prototype-only
+        // patch never runs, and every call then goes straight to the URL the
+        // Connection was built with, carrying web3's own `solana-client` header
+        // (which proofnetwork.lol/rpc's CORS rejects). So swap in a subclass that
+        // re-points the instance method after construction. The prototype hook
+        // stays for any code that calls it directly.
+        Connection.prototype._rpcRequest = poolRequest;
         Connection.prototype.__solRpcPoolPatched = true;
-        console.log('[sol-rpc-pool] Connection._rpcRequest patched — all calls now flow through the pool');
+        class PooledConnection extends Connection {
+            constructor(endpoint, commitmentOrConfig) {
+                super(endpoint, commitmentOrConfig);
+                this._rpcRequest = poolRequest;
+            }
+        }
+        let swapped = false;
+        try {
+            solanaWeb3.Connection = PooledConnection;
+            swapped = solanaWeb3.Connection === PooledConnection;
+        } catch (e) { /* frozen export object — handled below */ }
+        if (!swapped) {
+            try {
+                Object.defineProperty(solanaWeb3, 'Connection', { value: PooledConnection, configurable: true, writable: true, enumerable: true });
+                swapped = solanaWeb3.Connection === PooledConnection;
+            } catch (e) { /* non-configurable export */ }
+        }
+        if (swapped) console.log('[sol-rpc-pool] Connection wrapped — all calls now flow through the pool');
+        else console.warn('[sol-rpc-pool] could not wrap solanaWeb3.Connection — instances keep their own RPC transport');
         return true;
     };
 })();
@@ -759,7 +955,13 @@ class CryptoClient {
             onVerify: config.onVerify || null,
             // Mount point for the connect button (selector string or element)
             mountTo: config.mountTo || null,
-            // Theme options
+            // Overlay look: 'privy' (default) or 'classic' (the original dark sheet)
+            skin: config.skin || 'privy',
+            // Logo above "Connect Wallet" (privy skin)
+            icon: config.icon || null,
+            // Footer brand, "Protected by <brand>" (privy skin); false hides it
+            brand: config.brand === undefined ? 'ProofNetwork' : config.brand,
+            // Theme options (privy skin also reads mode / accent / accentInk / font / vars)
             theme: {
                 primaryColor: config.theme?.primaryColor || '#10b981',
                 accentColor: config.theme?.accentColor || '#34d399',
@@ -776,9 +978,11 @@ class CryptoClient {
 
         // Inject styles and create UI
         this.injectStyles();
+        if (this.config.skin === 'privy') this.injectSkinStyles();
         this.createHeaderButton();
         this.createWalletModal();
         this.createReconnectOverlay();
+        if (this.config.skin === 'privy') this.mountSkinChrome();
 
         // UI Elements
         this.elements = {
@@ -3687,6 +3891,1417 @@ class CryptoClient {
         document.documentElement.style.setProperty('--cc-accent', this.config.theme.accentColor);
     }
 
+    // ==================== PRIVY SKIN ====================
+    // config.skin = 'privy' (default) dresses the overlay as a compact Privy-style
+    // dialog: light/dark palette with a persisted sun/moon toggle, app logo above
+    // the title, phone bottom-sheet grabber, "Protected by" footer, a "current
+    // wallet" strip in the burner manager and a spinner → check interstitial on
+    // connect. config.skin = 'classic' keeps the original dark sheet untouched.
+    //
+    // config.theme knobs (all optional):
+    //   mode:      'light' | 'dark'        first-visit theme (the toggle persists after)
+    //   accent:    any CSS colour or var()  e.g. '#676fff', 'var(--brand)'
+    //   accentInk: text colour ON the accent (default #fff; use a dark ink on a light accent)
+    //   font:      font-family stack for the overlay
+    //   vars:      { '--cc-…': value }      raw overrides (e.g. --cc-skin-dark-hi / -lo)
+    // config.icon  → logo shown above "Connect Wallet" (else a vault glyph tile)
+    // config.brand → footer brand ("Protected by <brand>"), default 'ProofNetwork'; false hides it
+
+    static get WALLET_THEME_KEY() { return 'cc-wallet-theme'; }
+
+    injectSkinStyles() {
+        if (document.getElementById('cc-wallet-skin')) return;
+        const styles = document.createElement('style');
+        styles.id = 'cc-wallet-skin';
+        styles.textContent = `
+            /* ═══════════════════════════════════════════════════════════════
+               PRIVY SKIN (config.skin = 'privy', the default) — a compact
+               centered dialog (white bottom sheet on phones), individually
+               bordered rows, one accent, light + dark. Layered OVER the base
+               sheet above: ids / an html prefix win the cascade, no !important
+               (except the one inline-colour re-ink noted below).
+               Knobs (set inline on <html> from config.theme):
+                 --cc-accent              primary actions, focus, spinner
+                 --cc-skin-accent-ink     text on the accent (white by default)
+                 --cc-skin-accent-hover   pressed/hover accent
+                 --cc-skin-font           UI face
+                 --cc-skin-dark-hi/-lo    dark-mode dialog gradient
+               html[data-cc-wallet-theme] = 'light' | 'dark' (persisted toggle).
+            ═══════════════════════════════════════════════════════════════ */
+            html[data-cc-wallet-theme] {
+                --cc-skin-font: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                --cc-skin-mono: ui-monospace, 'SF Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
+                --cc-skin-accent-ink: #ffffff;
+                --cc-skin-accent-hover: color-mix(in srgb, var(--cc-accent) 88%, #000);
+                --cc-skin-dark-hi: #1b1d29;
+                --cc-skin-dark-lo: #14151d;
+                --cc-accent-orange: #f79009;
+                --cc-accent-green: #12b76a;
+                --cc-accent-purple: #7a5af8;
+                --cc-accent-red: #f04438;
+                --cc-accent-blue: var(--cc-accent);
+            }
+            html[data-cc-wallet-theme="light"] {
+                --cc-bg-primary: #ffffff;
+                --cc-bg-secondary: #f7f7f9;
+                --cc-bg-elevated: #f2f3f7;
+                --cc-border: #e2e3eb;
+                --cc-border-hover: #d0d2dc;
+                --cc-text-primary: #101828;
+                --cc-text-secondary: #667085;
+                --cc-text-tertiary: #98a2b3;
+            }
+            html[data-cc-wallet-theme="dark"] {
+                --cc-bg-primary: var(--cc-skin-dark-lo);
+                --cc-bg-secondary: rgba(255, 255, 255, 0.05);
+                --cc-bg-elevated: rgba(255, 255, 255, 0.09);
+                --cc-border: color-mix(in srgb, var(--cc-accent) 12%, transparent);
+                --cc-border-hover: color-mix(in srgb, var(--cc-accent) 26%, transparent);
+                --cc-text-primary: #f2f3fa;
+                --cc-text-secondary: #a5abc0;
+                --cc-text-tertiary: #717892;
+            }
+
+            /* ── the button: Privy-style white pill ────────────────────────────────────── */
+
+            #cc-header-btn,
+            #cc-header-btn.connected {
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+              font-family: var(--cc-skin-font);
+              -webkit-font-smoothing: antialiased;
+              font-size: 13.5px;
+              font-weight: 600;
+              letter-spacing: -0.005em;
+              text-transform: none;
+              color: #101828;
+              background: #ffffff;
+              border: 1px solid #e2e3eb;
+              border-radius: 12px;
+              box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+              padding: 0 14px;
+              height: 38px;
+              clip-path: none;
+              transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+            }
+            #cc-header-btn:hover {
+              background: #f7f7f9;
+              border-color: #d0d2dc;
+            }
+            #cc-header-btn:active { transform: scale(0.98); }
+            #cc-header-btn .cc-header-btn-icon { width: 15px; height: 15px; }
+            #cc-header-btn .cc-header-btn-address {
+              font-family: var(--cc-skin-mono);
+              font-size: 12px;
+              color: #667085;
+            }
+            #cc-header-btn .cc-header-btn-dot {
+              width: 7px; height: 7px;
+              border-radius: 50%;
+              background: #12b76a;
+              box-shadow: none;
+            }
+
+            /* ── the backdrop: a plain quiet dim (Privy uses no heavy frost) ───────────── */
+            html #cc-wallet-modal.cc-modal-backdrop {
+              background: rgba(16, 17, 22, 0.72);
+              -webkit-backdrop-filter: blur(4px);
+              backdrop-filter: blur(4px);
+              transition: opacity 0.25s ease, visibility 0.25s ease;
+            }
+
+            /* ── the dialog: one compact white card, centered ──────────────────────────── */
+            html #cc-wallet-modal .cc-modal {
+              top: 50%;
+              left: 50%;
+              width: min(400px, calc(100vw - 32px));
+              max-width: none;
+              height: auto;
+              max-height: min(640px, calc(100vh - 48px));
+              margin: 0;
+              padding: 24px 20px 16px;
+              background: #ffffff;
+              border: 1px solid #eff1f5;
+              border-radius: 24px;
+              box-shadow: 0 20px 50px -12px rgba(16, 24, 40, 0.4), 0 4px 12px rgba(16, 24, 40, 0.08);
+              overflow-y: auto;
+              overscroll-behavior: contain;
+              display: block;
+              pointer-events: auto;
+              font-family: var(--cc-skin-font);
+              -webkit-font-smoothing: antialiased;
+              transform: translate(-50%, calc(-50% + 8px)) scale(0.97);
+              transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.3s;
+            }
+            html #cc-wallet-modal.cc-modal-backdrop.visible .cc-modal {
+              transform: translate(-50%, -50%) scale(1);
+            }
+            html #cc-wallet-modal .cc-modal * { font-family: inherit; }
+            /* the skin's widths assume border-box (ProofFront sets it globally;
+               a host page may not) — without it padded 100%-wide rows overflow */
+            html #cc-wallet-modal .cc-modal,
+            html #cc-wallet-modal .cc-modal *,
+            html #cc-wallet-modal .cc-modal *::before,
+            html #cc-wallet-modal .cc-modal *::after { box-sizing: border-box; }
+            html #cc-wallet-modal .cc-modal::-webkit-scrollbar-thumb { background: #e2e3eb; }
+            /* the vendor's ≤480px sheet mode draws its own drag pill via .cc-modal::before —
+               we inject our own grabber (.cc-skin-grip); keep the vendor's suppressed */
+            html #cc-wallet-modal .cc-modal::before { content: none; }
+            .cc-skin-grip { display: none; pointer-events: none; }
+
+            /* the vendor's close button → Privy's small gray circle */
+            html #cc-wallet-modal .cc-close-btn {
+              display: flex;
+              top: 14px; right: 14px;
+              width: 28px; height: 28px;
+              border-radius: 50%;
+              background: #f2f3f7;
+              color: #667085;
+              font-size: 16px;
+              transition: background 0.15s ease, color 0.15s ease;
+            }
+            html #cc-wallet-modal .cc-close-btn:hover {
+              background: #e9eaef;
+              color: #101828;
+            }
+
+            /* ── header: app logo/monogram + modest title (Privy "Log in or sign up") ──── */
+            html #cc-wallet-modal .cc-header {
+              text-align: center;
+              margin: 4px 0 18px;
+              padding: 0;
+              background: transparent;
+              border: 0;
+            }
+            .cc-skin-appicon {
+              width: 44px; height: 44px;
+              margin: 0 auto 12px;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              border-radius: 12px;
+              background: var(--cc-accent);
+              border: 0;
+              box-shadow: none;
+              color: var(--cc-skin-accent-ink);
+              font-size: 20px;
+              font-weight: 700;
+            }
+            /* a real app logo shows PLAIN (no tile behind it), Privy-style */
+            .cc-skin-appicon:has(img) {
+              width: auto; height: 48px;
+              background: transparent;
+              border-radius: 0;
+            }
+            .cc-skin-appicon img { width: auto; height: 48px; max-width: 140px; object-fit: contain; }
+            html #cc-wallet-modal .cc-title {
+              margin: 0;
+              font-size: 18px;
+              font-weight: 600;
+              letter-spacing: -0.01em;
+              color: #101828;
+              text-shadow: none;
+            }
+            html #cc-wallet-modal .cc-subtitle {
+              margin: 5px 0 0;
+              font-size: 13.5px;
+              letter-spacing: 0;
+              color: #667085;
+              text-shadow: none;
+            }
+
+            /* ── wallet options: individually-bordered white rows (Privy login methods) ──
+               the library inlines display:flex on #cc-wallet-list — column it, NEVER grid */
+            html #cc-wallet-modal #cc-wallet-list {
+              flex-direction: column;
+              flex-wrap: nowrap;
+              gap: 8px;
+              width: 100%;
+              background: transparent;
+              border: 0;
+              border-radius: 0;
+            }
+            html #cc-wallet-modal .cc-wallet-btn {
+              position: relative;
+              display: flex;
+              flex-direction: row;
+              align-items: center;
+              justify-content: flex-start;
+              gap: 12px;
+              width: 100%;
+              min-height: 52px;
+              margin: 0;
+              padding: 8px 14px;
+              text-align: left;
+              background: #ffffff;
+              border: 1px solid #e2e3eb;
+              border-radius: 12px;
+              box-shadow: none;
+              transition: background 0.15s ease, border-color 0.15s ease;
+            }
+            html #cc-wallet-modal .cc-wallet-btn:hover {
+              background: #f7f7f9;
+              border-color: #d0d2dc;
+              transform: none;
+              box-shadow: none;
+            }
+            html #cc-wallet-modal .cc-wallet-btn:active { background: #f2f3f7; }
+            html #cc-wallet-modal .cc-wallet-btn + .cc-wallet-btn::after { content: none; }
+            html #cc-wallet-modal .cc-wallet-icon { width: 28px; height: 28px; border-radius: 7px; }
+            html #cc-wallet-modal .cc-wallet-info {
+              flex: 1;
+              min-width: 0;
+              display: flex;
+              flex-direction: column;
+              align-items: flex-start;
+              gap: 1px;
+            }
+            html #cc-wallet-modal .cc-wallet-name {
+              margin: 0;
+              font-size: 14.5px;
+              font-weight: 500;
+              letter-spacing: -0.005em;
+              color: #101828;
+            }
+            html #cc-wallet-modal .cc-wallet-status { margin: 0; font-size: 12px; color: #98a2b3; }
+            html #cc-wallet-modal .cc-wallet-arrow {
+              display: block;
+              margin-left: auto;
+              font-size: 16px;
+              color: #98a2b3;
+            }
+            html #cc-wallet-modal .cc-last-used-badge {
+              position: static;
+              margin-left: auto;
+              padding: 3px 8px;
+              font-size: 11px;
+              font-weight: 500;
+              border-radius: 8px;
+              background: #f2f3f7;
+              color: #667085;
+            }
+            html #cc-wallet-modal .cc-last-used-badge ~ .cc-wallet-arrow { margin-left: 8px; }
+
+            /* ── connected: bordered identity row + method rows + Privy button pair ────── */
+            html #cc-wallet-modal #cc-connected-view {
+              width: 100%;
+              max-height: none;
+              padding: 32px 0 0; /* clear the floating theme toggle / close circles */
+              background: transparent;
+              border: 0;
+              box-shadow: none;
+            }
+            html #cc-wallet-modal .cc-connected-wallet-info {
+              display: flex;
+              align-items: center;
+              gap: 12px;
+              width: 100%;
+              margin: 0 0 12px;
+              padding: 12px 14px;
+              background: #ffffff;
+              border: 1px solid #e2e3eb;
+              border-radius: 12px;
+              box-shadow: none;
+            }
+            html #cc-wallet-modal .cc-connected-wallet-icon {
+              width: 40px; height: 40px;
+              border-radius: 50%;
+              box-shadow: none;
+            }
+            html #cc-wallet-modal .cc-connected-wallet-details { flex: 1; min-width: 0; text-align: left; }
+            html #cc-wallet-modal .cc-connected-wallet-name {
+              margin: 0;
+              font-size: 14.5px;
+              font-weight: 600;
+              letter-spacing: -0.005em;
+              color: #101828;
+            }
+            html #cc-wallet-modal .cc-connected-wallet-address {
+              margin: 2px 0 0;
+              font-family: var(--cc-skin-mono);
+              font-size: 12px;
+              color: #667085;
+            }
+            html #cc-wallet-modal .cc-connected-wallet-dot {
+              flex-shrink: 0;
+              width: 8px; height: 8px;
+              border-radius: 50%;
+              background: #12b76a;
+              box-shadow: 0 0 0 3px rgba(18, 183, 106, 0.15);
+            }
+            html #cc-wallet-modal .cc-quick-actions {
+              display: flex;
+              flex-direction: column;
+              flex-wrap: nowrap;
+              gap: 8px;
+              margin: 0 0 12px;
+              background: transparent;
+              border: 0;
+              border-radius: 0;
+            }
+            html #cc-wallet-modal .cc-quick-action-btn {
+              position: relative;
+              display: flex;
+              flex-direction: row;
+              align-items: center;
+              justify-content: flex-start;
+              gap: 12px;
+              width: 100%;
+              min-height: 56px;
+              margin: 0;
+              padding: 8px 14px;
+              text-align: left;
+              background: #ffffff;
+              border: 1px solid #e2e3eb;
+              border-radius: 12px;
+              box-shadow: none;
+              transition: background 0.15s ease, border-color 0.15s ease;
+            }
+            html #cc-wallet-modal .cc-quick-action-btn:hover {
+              background: #f7f7f9;
+              border-color: #d0d2dc;
+              transform: none;
+              box-shadow: none;
+            }
+            html #cc-wallet-modal .cc-quick-action-btn:active { background: #f2f3f7; }
+            html #cc-wallet-modal .cc-quick-action-btn + .cc-quick-action-btn::after { content: none; }
+            /* icon tiles: the vendor hardcodes EMOJI text here — zero it out (font-size 0)
+               and paint a clean masked SVG glyph in the tint colour instead (Privy-style) */
+            html #cc-wallet-modal .cc-quick-action-icon {
+              position: relative;
+              width: 36px; height: 36px;
+              border-radius: 10px;
+              font-size: 0;
+            }
+            html #cc-wallet-modal .cc-quick-action-icon::after {
+              content: '';
+              position: absolute;
+              inset: 0;
+              margin: auto;
+              width: 18px; height: 18px;
+              background: currentColor;
+              -webkit-mask: var(--cc-skin-glyph) center / contain no-repeat;
+              mask: var(--cc-skin-glyph) center / contain no-repeat;
+            }
+            html #cc-wallet-modal .cc-quick-action-icon.burner {
+              background: #fff4e5;
+              color: #f79009;
+              --cc-skin-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M13.5.67s.74 2.65.74 4.8c0 2.06-1.35 3.73-3.41 3.73-2.07 0-3.63-1.67-3.63-3.73l.03-.36C5.21 7.51 4 10.62 4 14c0 4.42 3.58 8 8 8s8-3.58 8-8C20 8.61 17.41 3.8 13.5.67zM11.71 19c-1.78 0-3.22-1.4-3.22-3.14 0-1.62 1.05-2.76 2.81-3.12 1.77-.36 3.6-1.21 4.62-2.58.39 1.29.59 2.65.59 4.04 0 2.65-2.15 4.8-4.8 4.8z'/%3E%3C/svg%3E");
+            }
+            html #cc-wallet-modal .cc-quick-action-icon.transfer {
+              background: #e9f9f0;
+              color: #12b76a;
+              --cc-skin-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5H9z'/%3E%3C/svg%3E");
+            }
+            html #cc-wallet-modal .cc-quick-action-icon.swap {
+              background: #f0ebff;
+              color: #7a5af8;
+              --cc-skin-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M11 21h-1l1-7H7.5c-.88 0-.33-.75-.31-.78C8.48 10.94 10.42 7.54 13.01 3h1l-1 7h3.51c.4 0 .62.19.4.66C12.97 17.55 11 21 11 21z'/%3E%3C/svg%3E");
+            }
+            html #cc-wallet-modal .cc-quick-action-info { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+            html #cc-wallet-modal .cc-quick-action-title {
+              margin: 0;
+              font-size: 14.5px;
+              font-weight: 500;
+              letter-spacing: -0.005em;
+              color: #101828;
+            }
+            html #cc-wallet-modal .cc-quick-action-desc { margin: 0; font-size: 12px; color: #98a2b3; }
+            html #cc-wallet-modal .cc-quick-action-arrow {
+              display: block;
+              margin-left: auto;
+              font-size: 16px;
+              color: #98a2b3;
+            }
+            html #cc-wallet-modal .cc-connected-footer {
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+              margin: 0;
+            }
+            html #cc-wallet-modal .cc-switch-wallet-btn,
+            html #cc-wallet-modal .cc-disconnect-btn-small {
+              flex: none;
+              width: 100%;
+              min-width: 0;
+              padding: 12px;
+              border-radius: 12px;
+              font-size: 14.5px;
+              font-weight: 600;
+              letter-spacing: -0.005em;
+              box-shadow: none;
+              transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+            }
+            html #cc-wallet-modal .cc-switch-wallet-btn {
+              background: var(--cc-accent);
+              border: 1px solid var(--cc-accent);
+              color: var(--cc-skin-accent-ink);
+            }
+            html #cc-wallet-modal .cc-switch-wallet-btn:hover { background: var(--cc-skin-accent-hover); border-color: var(--cc-skin-accent-hover); }
+            html #cc-wallet-modal .cc-disconnect-btn-small {
+              background: #ffffff;
+              border: 1px solid #e2e3eb;
+              color: #f04438;
+            }
+            html #cc-wallet-modal .cc-disconnect-btn-small:hover { background: #fef3f2; border-color: #fecdca; }
+            html #cc-wallet-modal .cc-switch-wallet-btn:active,
+            html #cc-wallet-modal .cc-disconnect-btn-small:active { transform: scale(0.985); }
+
+            /* ── burner manager: same dialog — gray back chip + bordered list group ────── */
+            html #cc-wallet-modal #cc-burner-view {
+              width: 100%;
+              max-height: none;
+              overflow: visible;
+              padding: 32px 0 0; /* clear the floating theme toggle / close circles (the back chip sits top-left) */
+              background: transparent;
+              border: 0;
+              box-shadow: none;
+              border-radius: 0;
+            }
+            html #cc-wallet-modal .cc-burner-header {
+              position: relative;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              margin: 0 0 14px;
+              padding: 0;
+            }
+            html #cc-wallet-modal .cc-burner-back {
+              position: absolute;
+              left: 0;
+              width: 28px; height: 28px;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              padding: 0 0 2px;
+              border: 0;
+              border-radius: 50%;
+              background: #f2f3f7;
+              color: #667085;
+              font-size: 17px;
+              line-height: 1;
+              cursor: pointer;
+              transition: background 0.15s ease, color 0.15s ease;
+            }
+            html #cc-wallet-modal .cc-burner-back:hover { background: #e9eaef; color: #101828; }
+            html #cc-wallet-modal .cc-burner-title {
+              margin: 0;
+              font-size: 16px;
+              font-weight: 600;
+              letter-spacing: -0.01em;
+              color: #101828;
+            }
+            html #cc-wallet-modal .cc-burner-list {
+              background: #ffffff;
+              border: 1px solid #e2e3eb;
+              border-radius: 12px;
+              padding: 0;
+            }
+            html #cc-wallet-modal .cc-burner-item-wrapper {
+              background: transparent;
+              border: 0;
+              border-radius: 0;
+            }
+            html #cc-wallet-modal .cc-burner-item-wrapper + .cc-burner-item-wrapper { border-top: 1px solid #eff1f5; }
+            html #cc-wallet-modal .cc-burner-item-wrapper.active { background: #f7f7f9; }
+            /* the vendor hardcodes WHITE item text (its dark theme) — re-ink for the
+               light dialog so the expanded/active row stays readable */
+            html #cc-wallet-modal .cc-burner-item-name { color: #101828; }
+            html #cc-wallet-modal .cc-burner-item-address,
+            html #cc-wallet-modal .cc-burner-item-balance { color: #667085; }
+            /* the vendor re-colours the balance INLINE (white-alpha when 0 / green when
+               funded) — an inline style beats any selector, so match the white-alpha
+               serialisation and force re-ink (the one !important in this block; the
+               funded-green inline value is left alone — it reads fine on white) */
+            html #cc-wallet-modal .cc-burner-item-balance[style*="255, 255, 255"] { color: #98a2b3 !important; }
+            /* the expand toggle: the vendor renders a bare 34px "∨" — not obvious to a
+               new user. Hide the glyph (font-size 0) and rebuild it as a labelled
+               "Manage" pill with a rotating chevron ("Close" while open). */
+            html #cc-wallet-modal .cc-burner-options-toggle {
+              width: auto;
+              height: 30px;
+              padding: 0 10px 0 12px;
+              gap: 5px;
+              font-size: 0;
+              background: #f2f3f7;
+              border: 0;
+              border-radius: 8px;
+              color: #667085;
+              transition: background 0.15s ease, color 0.15s ease;
+            }
+            html #cc-wallet-modal .cc-burner-options-toggle::before {
+              content: 'Manage';
+              font-size: 12px;
+              font-weight: 600;
+              letter-spacing: -0.005em;
+              line-height: 1;
+            }
+            html #cc-wallet-modal .cc-burner-options-toggle::after {
+              content: '';
+              width: 11px; height: 11px;
+              background: currentColor;
+              -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M7.4 8.6 12 13.2l4.6-4.6L18 10l-6 6-6-6z'/%3E%3C/svg%3E") center / contain no-repeat;
+              mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M7.4 8.6 12 13.2l4.6-4.6L18 10l-6 6-6-6z'/%3E%3C/svg%3E") center / contain no-repeat;
+              transition: transform 0.2s ease;
+            }
+            html #cc-wallet-modal .cc-burner-options-toggle:hover { background: #e9eaef; color: #101828; }
+            html #cc-wallet-modal .cc-burner-options-toggle.open {
+              background: #e9eaef;
+              color: #101828;
+              transform: none; /* the vendor rotates the whole button 180° to flip its ∨ glyph — that mirrors our label */
+            }
+            html #cc-wallet-modal .cc-burner-options-toggle.open::before { content: 'Close'; }
+            html #cc-wallet-modal .cc-burner-options-toggle.open::after { transform: rotate(180deg); }
+            /* expanded per-wallet actions (Copy/QR/Rename/Send/Export/Delete): white
+               bordered Privy tiles, emoji icons swapped for masked SVG glyphs */
+            html #cc-wallet-modal .cc-burner-action {
+              background: #ffffff;
+              border: 1px solid #e2e3eb;
+              border-radius: 10px;
+              box-shadow: none;
+              transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+            }
+            html #cc-wallet-modal .cc-burner-action:hover {
+              background: #f7f7f9;
+              border-color: #d0d2dc;
+            }
+            html #cc-wallet-modal .cc-burner-action-label {
+              font-size: 10px;
+              font-weight: 600;
+              letter-spacing: 0.4px;
+              color: #667085;
+            }
+            html #cc-wallet-modal .cc-burner-action-icon {
+              display: block;
+              width: 17px; height: 17px;
+              font-size: 0;
+              color: #667085;
+              background: currentColor;
+              -webkit-mask: var(--cc-skin-glyph) center / contain no-repeat;
+              mask: var(--cc-skin-glyph) center / contain no-repeat;
+            }
+            html #cc-wallet-modal .cc-burner-action.copy .cc-burner-action-icon { --cc-skin-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z'/%3E%3C/svg%3E"); }
+            html #cc-wallet-modal .cc-burner-action.qr .cc-burner-action-icon { --cc-skin-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M3 11h8V3H3v8zm2-6h4v4H5V5zM3 21h8v-8H3v8zm2-6h4v4H5v-4zM13 3v8h8V3h-8zm6 6h-4V5h4v4zM13 13h2v2h-2zm2 2h2v2h-2zm-2 2h2v2h-2zm4 0h2v2h-2zm2-2h2v2h-2zm-2 4h2v2h-2zm2 2h2v2h-2zm-2-8h2v2h-2z'/%3E%3C/svg%3E"); }
+            html #cc-wallet-modal .cc-burner-action.rename .cc-burner-action-icon { --cc-skin-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z'/%3E%3C/svg%3E"); }
+            html #cc-wallet-modal .cc-burner-action.transfer .cc-burner-action-icon { --cc-skin-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 5v2h6.59L4 18.59 5.41 20 17 8.41V15h2V5H9z'/%3E%3C/svg%3E"); }
+            html #cc-wallet-modal .cc-burner-action.export .cc-burner-action-icon { --cc-skin-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M21 10h-8.35A5.99 5.99 0 0 0 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6a5.99 5.99 0 0 0 5.65-4H13l2 2 2-2 2 2 2.35-2.35L21 10zM7 15c-1.65 0-3-1.35-3-3s1.35-3 3-3 3 1.35 3 3-1.35 3-3 3z'/%3E%3C/svg%3E"); }
+            html #cc-wallet-modal .cc-burner-action.delete .cc-burner-action-icon { --cc-skin-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z'/%3E%3C/svg%3E"); }
+            html #cc-wallet-modal .cc-burner-action.delete .cc-burner-action-icon { color: #f04438; }
+            html #cc-wallet-modal .cc-burner-action.delete .cc-burner-action-label { color: #f04438; }
+            html #cc-wallet-modal .cc-burner-action.delete:hover { background: #fef3f2; border-color: #fecdca; }
+            /* the inline rename editor, re-inked for the light dialog */
+            html #cc-wallet-modal .cc-rename-input {
+              background: #ffffff;
+              border: 1px solid #d0d2dc;
+              border-radius: 8px;
+              color: #101828;
+            }
+            html #cc-wallet-modal .cc-rename-save {
+              background: var(--cc-accent);
+              border: 0;
+              border-radius: 8px;
+              color: var(--cc-skin-accent-ink);
+            }
+            html #cc-wallet-modal .cc-burner-item-address { font-family: var(--cc-skin-mono); }
+            html #cc-wallet-modal .cc-connected-address { font-family: var(--cc-skin-mono); }
+            /* burner actions → light tinted Privy-style buttons (no dashed outlines) */
+            html #cc-wallet-modal .cc-burner-generate,
+            html #cc-wallet-modal .cc-burner-import,
+            html #cc-wallet-modal .cc-bulk-buy-btn {
+              border: 1px solid transparent;
+              border-radius: 12px;
+              box-shadow: none;
+              font-size: 13.5px;
+              font-weight: 600;
+              letter-spacing: -0.005em;
+              transition: background 0.15s ease, transform 0.12s ease;
+            }
+            html #cc-wallet-modal .cc-burner-generate { background: var(--cc-accent); color: var(--cc-skin-accent-ink); }
+            html #cc-wallet-modal .cc-burner-generate:hover { background: var(--cc-skin-accent-hover); }
+            html #cc-wallet-modal .cc-burner-import { background: #ffffff; border-color: #e2e3eb; color: #101828; }
+            html #cc-wallet-modal .cc-burner-import:hover { background: #f7f7f9; border-color: #d0d2dc; }
+            html #cc-wallet-modal .cc-bulk-buy-btn { background: #ffffff; border-color: #e2e3eb; color: #101828; }
+            html #cc-wallet-modal .cc-bulk-buy-btn:hover { background: #f7f7f9; border-color: #d0d2dc; }
+            html #cc-wallet-modal .cc-burner-generate:active,
+            html #cc-wallet-modal .cc-burner-import:active,
+            html #cc-wallet-modal .cc-bulk-buy-btn:active { transform: scale(0.985); }
+            /* the local-storage warning → Privy-style soft amber note */
+            html #cc-wallet-modal .cc-burner-warning {
+              background: #f7f7f9;
+              border: 1px solid #eff1f5;
+              border-radius: 12px;
+              padding: 10px 12px;
+              font-size: 12px;
+              line-height: 1.45;
+              letter-spacing: 0;
+              color: #667085;
+            }
+
+            /* ── status footnote + "Protected by" footer badge ─────────────────────────── */
+            html #cc-wallet-modal #cc-status {
+              margin-top: 10px;
+              text-align: center;
+              font-size: 12px;
+              letter-spacing: 0;
+              color: #667085;
+            }
+            html #cc-wallet-modal #cc-status:empty { display: none; }
+            html #cc-wallet-modal #cc-status.error { color: #f04438; }
+            html #cc-wallet-modal #cc-status.success { color: #12b76a; }
+
+            .cc-skin-badge {
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              gap: 5px;
+              margin: 14px -20px 0;
+              padding: 12px 0 2px;
+              border-top: 1px solid #eff1f5;
+              font-size: 12px;
+              color: #98a2b3;
+            }
+            .cc-skin-badge svg { display: block; opacity: 0.7; }
+            .cc-skin-badge b { font-weight: 600; color: #667085; }
+
+            /* ── connect SUCCESS interstitial: spinner → green check + "Connected" ─────── */
+            .cc-skin-success {
+              position: absolute;
+              inset: 0;
+              z-index: 5;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              justify-content: center;
+              gap: 16px;
+              background: #ffffff;
+              border-radius: inherit;
+              opacity: 0;
+              pointer-events: none;
+              transition: opacity 0.25s ease;
+            }
+            .cc-skin-success.is-on { opacity: 1; pointer-events: auto; }
+            .cc-skin-success-spin {
+              width: 44px; height: 44px;
+              border: 3px solid #eff1f5;
+              border-top-color: var(--cc-accent);
+              border-radius: 50%;
+              animation: cc-skin-spin 0.8s linear infinite;
+            }
+            @keyframes cc-skin-spin { to { transform: rotate(360deg); } }
+            .cc-skin-success-check {
+              display: none;
+              width: 44px; height: 44px;
+              align-items: center;
+              justify-content: center;
+              border-radius: 50%;
+              background: #12b76a;
+              color: #ffffff;
+              box-shadow: 0 0 0 6px rgba(18, 183, 106, 0.14);
+            }
+            .cc-skin-success.is-done .cc-skin-success-spin { display: none; }
+            .cc-skin-success.is-done .cc-skin-success-check {
+              display: flex;
+              animation: cc-skin-pop 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+            }
+            @keyframes cc-skin-pop { from { transform: scale(0.4); opacity: 0; } }
+            .cc-skin-success-label {
+              font-size: 15px;
+              font-weight: 600;
+              letter-spacing: -0.01em;
+              color: #101828;
+            }
+
+            /* ── phones (≤700px): the dialog becomes a white bottom sheet ──────────────── */
+            @media (max-width: 700px) {
+              html #cc-wallet-modal .cc-modal {
+                top: auto;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                width: 100%;
+                max-height: 86vh;
+                max-height: 86dvh;
+                padding: 6px 16px calc(14px + env(safe-area-inset-bottom, 0px));
+                border: 0;
+                border-radius: 20px 20px 0 0;
+                transform: translateY(100%);
+              }
+              html #cc-wallet-modal.cc-modal-backdrop.visible .cc-modal { transform: translateY(0); }
+
+              .cc-skin-grip {
+                display: block;
+                width: 36px;
+                height: 5px;
+                margin: 4px auto 10px;
+                border-radius: 3px;
+                background: #d5d7e0;
+              }
+
+              html #cc-wallet-modal .cc-close-btn { top: 12px; right: 12px; }
+              html #cc-wallet-modal .cc-header { margin: 0 0 14px; }
+              .cc-skin-badge { margin: 12px -16px 0; }
+            }
+
+            /* ── "current wallet" strip (top of the burner manager) ───────────────────── */
+            .cc-skin-current {
+              display: flex;
+              align-items: center;
+              gap: 10px;
+              margin: 0 0 12px;
+              padding: 10px 12px;
+              background: #f7f7f9;
+              border-radius: 12px;
+            }
+            .cc-skin-current-dot {
+              flex-shrink: 0;
+              width: 8px; height: 8px;
+              border-radius: 50%;
+              background: #12b76a;
+              box-shadow: 0 0 0 3px rgba(18, 183, 106, 0.15);
+            }
+            .cc-skin-current-info {
+              flex: 1;
+              min-width: 0;
+              display: flex;
+              align-items: baseline;
+              gap: 8px;
+            }
+            .cc-skin-current-info b {
+              font-size: 13.5px;
+              font-weight: 600;
+              letter-spacing: -0.005em;
+              color: #101828;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+            .cc-skin-current-info span {
+              font-family: var(--cc-skin-mono);
+              font-size: 11.5px;
+              color: #667085;
+            }
+            .cc-skin-current-tag {
+              flex-shrink: 0;
+              padding: 3px 8px;
+              font-size: 10.5px;
+              font-weight: 600;
+              border-radius: 999px;
+              background: rgba(18, 183, 106, 0.12);
+              color: #027a48;
+            }
+            html[data-cc-wallet-theme="dark"] .cc-skin-current { background: rgba(255, 255, 255, 0.06); }
+            html[data-cc-wallet-theme="dark"] .cc-skin-current-info b { color: #f2f3fa; }
+            html[data-cc-wallet-theme="dark"] .cc-skin-current-info span { color: #a5abc0; }
+            html[data-cc-wallet-theme="dark"] .cc-skin-current-tag { background: rgba(18, 183, 106, 0.18); color: #32d583; }
+
+            /* ── sun/moon theme toggle — mirrors the close circle, top-left ───────────── */
+            html #cc-wallet-modal .cc-skin-theme {
+              position: absolute;
+              top: 14px; left: 14px;
+              width: 28px; height: 28px;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              border: 0;
+              border-radius: 50%;
+              background: #f2f3f7;
+              color: #667085;
+              cursor: pointer;
+              transition: background 0.15s ease, color 0.15s ease;
+              /* moon glyph (light mode → "switch to dark") */
+              --cc-skin-theme-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'/%3E%3C/svg%3E");
+            }
+            html #cc-wallet-modal .cc-skin-theme:hover { background: #e9eaef; color: #101828; }
+            html #cc-wallet-modal .cc-skin-theme::after {
+              content: '';
+              width: 15px; height: 15px;
+              background: currentColor;
+              -webkit-mask: var(--cc-skin-theme-glyph) center / contain no-repeat;
+              mask: var(--cc-skin-theme-glyph) center / contain no-repeat;
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-skin-theme {
+              /* sun glyph (dark mode → "switch to light") */
+              --cc-skin-theme-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M12 7a5 5 0 1 0 0 10A5 5 0 0 0 12 7zm8.5 4H23v2h-2.5v-2zM1 11h2.5v2H1v-2zM11 1h2v2.5h-2V1zm0 20h2v2.5h-2V21zM4.9 3.5 6.7 5.3 5.3 6.7 3.5 4.9 4.9 3.5zm14.2 0 1.4 1.4-1.8 1.8-1.4-1.4 1.8-1.8zM5.3 17.3l1.4 1.4-1.8 1.8-1.4-1.4 1.8-1.8zm13.4 0 1.8 1.8-1.4 1.4-1.8-1.8 1.4-1.4z'/%3E%3C/svg%3E");
+            }
+
+            /* ── DARK theme (html[data-cc-wallet-theme="dark"]) — Privy dark mode ────────
+               the light skin hardcodes its neutrals, so dark re-declares every hardcoded
+               surface/ink; --cc-* vars are swapped by applyWalletTheme (core/wallet.js) */
+            html[data-cc-wallet-theme="dark"] #cc-header-btn,
+            html[data-cc-wallet-theme="dark"] #cc-header-btn.connected {
+              color: #f2f3fa;
+              background: #191b26;
+              border-color: color-mix(in srgb, var(--cc-accent) 20%, transparent);
+            }
+            html[data-cc-wallet-theme="dark"] #cc-header-btn:hover {
+              background: #20222f;
+              border-color: color-mix(in srgb, var(--cc-accent) 34%, transparent);
+            }
+            html[data-cc-wallet-theme="dark"] #cc-header-btn .cc-header-btn-address { color: #a5abc0; }
+
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-modal {
+              background:
+                radial-gradient(120% 55% at 50% -8%, color-mix(in srgb, var(--cc-accent) 14%, transparent), transparent 60%),
+                linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo));
+              border-color: color-mix(in srgb, var(--cc-accent) 16%, transparent);
+              box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.06),
+                0 20px 50px -12px rgba(0, 0, 0, 0.75),
+                0 0 70px -18px color-mix(in srgb, var(--cc-accent) 28%, transparent);
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-modal::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-close-btn,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-skin-theme,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-back {
+              background: rgba(255, 255, 255, 0.08);
+              color: #a5abc0;
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-close-btn:hover,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-skin-theme:hover,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-back:hover {
+              background: rgba(255, 255, 255, 0.14);
+              color: #f2f3fa;
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-title,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-title,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-name,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-connected-wallet-name,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-title,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-name { color: #f2f3fa; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-subtitle,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-connected-wallet-address,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-desc,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-address,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-balance,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal #cc-status { color: #a5abc0; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-status,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-arrow,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-arrow { color: #717892; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-balance[style*="255, 255, 255"] { color: #717892 !important; }
+
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-btn,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-btn,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-connected-wallet-info,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action {
+              background: rgba(255, 255, 255, 0.045);
+              border-color: color-mix(in srgb, var(--cc-accent) 11%, transparent);
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-btn:hover,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-btn:hover,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action:hover {
+              background: rgba(255, 255, 255, 0.08);
+              border-color: color-mix(in srgb, var(--cc-accent) 30%, transparent);
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-wallet-btn:active,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-btn:active { background: rgba(255, 255, 255, 0.11); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-last-used-badge {
+              background: rgba(255, 255, 255, 0.08);
+              color: #a5abc0;
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-icon.burner { background: rgba(247, 144, 9, 0.16); color: #fdb022; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-icon.transfer { background: rgba(18, 183, 106, 0.16); color: #32d583; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-quick-action-icon.swap { background: rgba(122, 90, 248, 0.18); color: #9b8afb; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-disconnect-btn-small {
+              background: rgba(255, 255, 255, 0.03);
+              border: 1px solid rgba(255, 255, 255, 0.12);
+              color: #f97066;
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-disconnect-btn-small:hover { background: rgba(240, 68, 56, 0.12); border-color: rgba(240, 68, 56, 0.3); }
+
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-list {
+              background: rgba(255, 255, 255, 0.045);
+              border-color: color-mix(in srgb, var(--cc-accent) 11%, transparent);
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-wrapper + .cc-burner-item-wrapper { border-top-color: rgba(255, 255, 255, 0.08); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-item-wrapper.active { background: rgba(255, 255, 255, 0.05); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-options-toggle {
+              background: rgba(255, 255, 255, 0.08);
+              color: #a5abc0;
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-options-toggle:hover,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-options-toggle.open {
+              background: rgba(255, 255, 255, 0.14);
+              color: #f2f3fa;
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action-label { color: #a5abc0; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action-icon { color: #a5abc0; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action.delete .cc-burner-action-icon,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action.delete .cc-burner-action-label { color: #f97066; }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-action.delete:hover { background: rgba(240, 68, 56, 0.12); border-color: rgba(240, 68, 56, 0.3); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-rename-input {
+              background: rgba(0, 0, 0, 0.28);
+              border-color: color-mix(in srgb, var(--cc-accent) 24%, transparent);
+              color: #f2f3fa;
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-import,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-bulk-buy-btn {
+              background: rgba(255, 255, 255, 0.05);
+              border-color: color-mix(in srgb, var(--cc-accent) 16%, transparent);
+              color: #f2f3fa;
+            }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-import:hover,
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-bulk-buy-btn:hover { background: rgba(255, 255, 255, 0.09); }
+            html[data-cc-wallet-theme="dark"] #cc-wallet-modal .cc-burner-warning {
+              background: rgba(255, 255, 255, 0.05);
+              border-color: rgba(255, 255, 255, 0.06);
+              color: #a5abc0;
+            }
+            html[data-cc-wallet-theme="dark"] .cc-skin-badge {
+              border-top-color: rgba(255, 255, 255, 0.08);
+              color: #717892;
+            }
+            html[data-cc-wallet-theme="dark"] .cc-skin-badge b { color: #a5abc0; }
+            html[data-cc-wallet-theme="dark"] .cc-skin-success { background: linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo)); }
+            html[data-cc-wallet-theme="dark"] .cc-skin-success-label { color: #f2f3fa; }
+            html[data-cc-wallet-theme="dark"] .cc-skin-success-spin { border-color: rgba(255, 255, 255, 0.12); border-top-color: var(--cc-accent); }
+            html[data-cc-wallet-theme="dark"] .cc-skin-grip { background: rgba(255, 255, 255, 0.28); }
+
+            /* ── Transfer / Bulk Buy sheets + the burner import form ──────────────
+               The base sheet paints these with hardcoded dark surfaces and an
+               emerald/purple brand. Re-point every colour at the skin palette so
+               they follow light/dark and the configured accent. Layout untouched.
+               Privacy mode keeps its sky-blue by re-scoping --cc-accent. */
+            html[data-cc-wallet-theme="light"] {
+                --cc-skin-row: #ffffff;
+                --cc-skin-row-hover: #f7f7f9;
+                --cc-skin-input: #ffffff;
+                --cc-skin-danger-ink: #d92d20;
+            }
+            html[data-cc-wallet-theme="dark"] {
+                --cc-skin-row: rgba(255, 255, 255, 0.045);
+                --cc-skin-row-hover: rgba(255, 255, 255, 0.08);
+                --cc-skin-input: rgba(0, 0, 0, 0.28);
+                --cc-skin-danger-ink: #f97066;
+            }
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode { --cc-accent: #0ea5e9; }
+
+            html[data-cc-wallet-theme] .cc-transfer-modal,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode,
+            html[data-cc-wallet-theme] .cc-bulk-modal {
+                background: var(--cc-bg-primary);
+                border-color: var(--cc-border);
+                color: var(--cc-text-primary);
+                font-family: var(--cc-skin-font);
+                -webkit-font-smoothing: antialiased;
+                box-shadow: 0 20px 50px -12px rgba(16, 24, 40, 0.4), 0 4px 12px rgba(16, 24, 40, 0.08);
+            }
+            html[data-cc-wallet-theme="dark"] .cc-transfer-modal,
+            html[data-cc-wallet-theme="dark"] .cc-transfer-modal.cc-privacy-mode,
+            html[data-cc-wallet-theme="dark"] .cc-bulk-modal {
+                background:
+                    radial-gradient(120% 55% at 50% -8%, color-mix(in srgb, var(--cc-accent) 14%, transparent), transparent 60%),
+                    linear-gradient(180deg, var(--cc-skin-dark-hi), var(--cc-skin-dark-lo));
+                box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 20px 50px -12px rgba(0, 0, 0, 0.75);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-modal *,
+            html[data-cc-wallet-theme] .cc-bulk-modal * { font-family: inherit; }
+            html[data-cc-wallet-theme] .cc-transfer-modal-handle,
+            html[data-cc-wallet-theme] .cc-bulk-modal-handle { background: var(--cc-border-hover); }
+
+            /* titles + secondary ink */
+            html[data-cc-wallet-theme] .cc-transfer-modal-title,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-modal-title,
+            html[data-cc-wallet-theme] .cc-bulk-modal-title,
+            html[data-cc-wallet-theme] .cc-transfer-source-name,
+            html[data-cc-wallet-theme] .cc-transfer-wallet-name,
+            html[data-cc-wallet-theme] .cc-bulk-wallet-name { color: var(--cc-text-primary); }
+            html[data-cc-wallet-theme] .cc-transfer-section-title,
+            html[data-cc-wallet-theme] .cc-transfer-amount-header,
+            html[data-cc-wallet-theme] .cc-bulk-wallets-title,
+            html[data-cc-wallet-theme] .cc-bulk-select-all span { color: var(--cc-text-secondary); }
+            html[data-cc-wallet-theme] .cc-transfer-recipient-count,
+            html[data-cc-wallet-theme] .cc-transfer-wallet-addr { color: var(--cc-text-tertiary); }
+
+            /* close circles (match the dialog's) */
+            html[data-cc-wallet-theme] .cc-transfer-modal-close,
+            html[data-cc-wallet-theme] .cc-bulk-modal-close {
+                background: var(--cc-bg-elevated);
+                border: 0;
+                border-radius: 50%;
+                color: var(--cc-text-secondary);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-modal-close:hover,
+            html[data-cc-wallet-theme] .cc-bulk-modal-close:hover {
+                background: var(--cc-border);
+                color: var(--cc-text-primary);
+            }
+
+            /* accent-tinted panels: source wallet, token, totals */
+            html[data-cc-wallet-theme] .cc-transfer-source,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-source,
+            html[data-cc-wallet-theme] .cc-bulk-token-section,
+            html[data-cc-wallet-theme] .cc-transfer-summary,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-summary,
+            html[data-cc-wallet-theme] .cc-bulk-summary,
+            html[data-cc-wallet-theme] .cc-swap-summary {
+                background: color-mix(in srgb, var(--cc-accent) 7%, var(--cc-skin-row));
+                border: 1px solid color-mix(in srgb, var(--cc-accent) 24%, transparent);
+                border-radius: 12px;
+            }
+            html[data-cc-wallet-theme] .cc-transfer-source::before { content: none; }
+            html[data-cc-wallet-theme] .cc-transfer-source-label,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-source-label,
+            html[data-cc-wallet-theme] .cc-bulk-token-label,
+            html[data-cc-wallet-theme] .cc-transfer-summary-label,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-summary-label,
+            html[data-cc-wallet-theme] .cc-bulk-summary-label { color: var(--cc-text-secondary); }
+            html[data-cc-wallet-theme] .cc-transfer-source-amount,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-source-amount,
+            html[data-cc-wallet-theme] .cc-transfer-summary-value,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-summary-value,
+            html[data-cc-wallet-theme] .cc-bulk-summary-value { color: var(--cc-text-primary); }
+            html[data-cc-wallet-theme] .cc-transfer-source-unit { color: var(--cc-text-tertiary); }
+
+            /* rows / cards */
+            html[data-cc-wallet-theme] .cc-transfer-recipient-card,
+            html[data-cc-wallet-theme] .cc-transfer-wallet-card,
+            html[data-cc-wallet-theme] .cc-transfer-amount-section,
+            html[data-cc-wallet-theme] .cc-bulk-wallet-card,
+            html[data-cc-wallet-theme] .cc-swap-wallet-item,
+            html[data-cc-wallet-theme] .cc-import-form {
+                background: var(--cc-skin-row);
+                border: 1px solid var(--cc-border);
+                border-radius: 12px;
+            }
+            html[data-cc-wallet-theme] .cc-transfer-recipient-card:hover,
+            html[data-cc-wallet-theme] .cc-transfer-wallet-card:hover,
+            html[data-cc-wallet-theme] .cc-bulk-wallet-card:hover {
+                background: var(--cc-skin-row-hover);
+                border-color: var(--cc-border-hover);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-wallet-card.selected,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-wallet-card.selected,
+            html[data-cc-wallet-theme] .cc-bulk-wallet-card.selected,
+            html[data-cc-wallet-theme] .cc-swap-wallet-item.selected {
+                background: color-mix(in srgb, var(--cc-accent) 8%, var(--cc-skin-row));
+                border-color: var(--cc-accent);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-wallet-check {
+                background: var(--cc-skin-input);
+                border: 1px solid var(--cc-border-hover);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-wallet-card.selected .cc-transfer-wallet-check,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-wallet-card.selected .cc-transfer-wallet-check {
+                background: var(--cc-accent);
+                border-color: var(--cc-accent);
+                color: var(--cc-skin-accent-ink);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-add-external-btn {
+                background: transparent;
+                border: 1px dashed var(--cc-border-hover);
+                border-radius: 12px;
+            }
+            html[data-cc-wallet-theme] .cc-transfer-add-external-btn:hover,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-add-external-btn:hover {
+                background: var(--cc-skin-row-hover);
+                border-color: var(--cc-accent);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-add-external-btn svg { color: var(--cc-text-tertiary); stroke: currentColor; }
+            html[data-cc-wallet-theme] .cc-transfer-add-external-btn:hover svg,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-add-external-btn:hover svg { color: var(--cc-accent); stroke: currentColor; }
+            html[data-cc-wallet-theme] .cc-transfer-add-external-btn span { color: var(--cc-text-secondary); }
+            html[data-cc-wallet-theme] .cc-transfer-add-external-btn:hover span,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-add-external-btn:hover span { color: var(--cc-text-primary); }
+
+            /* inputs */
+            html[data-cc-wallet-theme] .cc-transfer-recipient-select,
+            html[data-cc-wallet-theme] .cc-transfer-amount-input,
+            html[data-cc-wallet-theme] .cc-transfer-external-input,
+            html[data-cc-wallet-theme] .cc-transfer-ext-addr-input,
+            html[data-cc-wallet-theme] .cc-transfer-global-amount,
+            html[data-cc-wallet-theme] .cc-bulk-token-input,
+            html[data-cc-wallet-theme] .cc-bulk-total-input,
+            html[data-cc-wallet-theme] .cc-bulk-wallet-amount,
+            html[data-cc-wallet-theme] .cc-swap-token-input,
+            html[data-cc-wallet-theme] .cc-swap-wallet-amount,
+            html[data-cc-wallet-theme] .cc-import-form input {
+                background-color: var(--cc-skin-input);
+                border: 1px solid var(--cc-border-hover);
+                border-radius: 10px;
+                color: var(--cc-text-primary);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-amount-input::placeholder,
+            html[data-cc-wallet-theme] .cc-transfer-external-input::placeholder,
+            html[data-cc-wallet-theme] .cc-transfer-global-amount::placeholder,
+            html[data-cc-wallet-theme] .cc-bulk-token-input::placeholder,
+            html[data-cc-wallet-theme] .cc-bulk-total-input::placeholder,
+            html[data-cc-wallet-theme] .cc-bulk-wallet-amount::placeholder,
+            html[data-cc-wallet-theme] .cc-import-form input::placeholder { color: var(--cc-text-tertiary); }
+            html[data-cc-wallet-theme] .cc-transfer-recipient-select:focus,
+            html[data-cc-wallet-theme] .cc-transfer-amount-input:focus,
+            html[data-cc-wallet-theme] .cc-transfer-external-input:focus,
+            html[data-cc-wallet-theme] .cc-transfer-ext-addr-input:focus,
+            html[data-cc-wallet-theme] .cc-transfer-global-amount:focus,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-global-amount:focus,
+            html[data-cc-wallet-theme] .cc-bulk-token-input:focus,
+            html[data-cc-wallet-theme] .cc-bulk-total-input:focus,
+            html[data-cc-wallet-theme] .cc-bulk-wallet-amount:focus,
+            html[data-cc-wallet-theme] .cc-import-form input:focus {
+                outline: none;
+                border-color: var(--cc-accent);
+                box-shadow: 0 0 0 3px color-mix(in srgb, var(--cc-accent) 18%, transparent);
+            }
+
+            /* secondary pills: split / select-all / add */
+            html[data-cc-wallet-theme] .cc-transfer-even-split,
+            html[data-cc-wallet-theme] .cc-bulk-split-btn,
+            html[data-cc-wallet-theme] .cc-equal-split-btn,
+            html[data-cc-wallet-theme] .cc-transfer-add-btn,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-add-btn {
+                background: var(--cc-bg-elevated);
+                border: 1px solid transparent;
+                color: var(--cc-text-primary);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-even-split:hover,
+            html[data-cc-wallet-theme] .cc-bulk-split-btn:hover,
+            html[data-cc-wallet-theme] .cc-equal-split-btn:hover,
+            html[data-cc-wallet-theme] .cc-transfer-add-btn:hover,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-add-btn:hover {
+                background: var(--cc-border);
+                border-color: transparent;
+            }
+
+            /* primary + cancel actions (Privy button pair) */
+            html[data-cc-wallet-theme] .cc-transfer-send-btn,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-send-btn,
+            html[data-cc-wallet-theme] .cc-bulk-execute-btn {
+                background: var(--cc-accent);
+                border: 1px solid var(--cc-accent);
+                border-radius: 12px;
+                box-shadow: none;
+                color: var(--cc-skin-accent-ink);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-send-btn:hover,
+            html[data-cc-wallet-theme] .cc-transfer-modal.cc-privacy-mode .cc-transfer-send-btn:hover,
+            html[data-cc-wallet-theme] .cc-bulk-execute-btn:hover {
+                background: var(--cc-skin-accent-hover);
+                border-color: var(--cc-skin-accent-hover);
+                box-shadow: none;
+            }
+            html[data-cc-wallet-theme] .cc-transfer-cancel-btn,
+            html[data-cc-wallet-theme] .cc-bulk-cancel-btn {
+                background: var(--cc-skin-row);
+                border: 1px solid var(--cc-border);
+                border-radius: 12px;
+                color: var(--cc-text-primary);
+            }
+            html[data-cc-wallet-theme] .cc-transfer-cancel-btn:hover,
+            html[data-cc-wallet-theme] .cc-bulk-cancel-btn:hover {
+                background: var(--cc-skin-row-hover);
+                border-color: var(--cc-border-hover);
+                color: var(--cc-text-primary);
+            }
+
+            /* errors */
+            html[data-cc-wallet-theme] .cc-transfer-error,
+            html[data-cc-wallet-theme] .cc-bulk-error {
+                background: color-mix(in srgb, #f04438 8%, transparent);
+                border: 1px solid color-mix(in srgb, #f04438 22%, transparent);
+                border-radius: 10px;
+                color: var(--cc-skin-danger-ink);
+            }
+        `;
+        document.head.appendChild(styles);
+
+        const t = this.config.theme;
+        const root = document.documentElement.style;
+        root.setProperty('--cc-accent', t.accent || '#676fff');
+        root.setProperty('--cc-primary', t.accent || '#676fff');
+        if (t.accentInk) root.setProperty('--cc-skin-accent-ink', t.accentInk);
+        if (t.font) root.setProperty('--cc-skin-font', t.font);
+        if (t.vars && typeof t.vars === 'object') {
+            for (const k of Object.keys(t.vars)) {
+                if (k.startsWith('--')) root.setProperty(k, String(t.vars[k]));
+            }
+        }
+
+        let saved = null;
+        try { saved = localStorage.getItem(CryptoClient.WALLET_THEME_KEY); } catch { /* storage blocked */ }
+        this.setWalletTheme(saved || t.mode || 'light', false);
+    }
+
+    /**
+     * Switch the Privy skin between light and dark.
+     * @param {'light'|'dark'} mode
+     * @param {boolean} [persist=true] Remember the choice for the next visit
+     */
+    setWalletTheme(mode, persist = true) {
+        const m = mode === 'dark' ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-cc-wallet-theme', m);
+        if (persist) {
+            try { localStorage.setItem(CryptoClient.WALLET_THEME_KEY, m); } catch { /* storage blocked */ }
+        }
+    }
+
+    /**
+     * Add the skin's extra chrome to the overlay. Everything here is decoration
+     * layered on the library's own DOM: connect, close, ESC and view switching
+     * are untouched.
+     */
+    mountSkinChrome() {
+        const backdrop = document.getElementById('cc-wallet-modal');
+        const modal = backdrop && backdrop.querySelector('.cc-modal');
+        if (!modal || modal.dataset.ccSkin) return;
+        modal.dataset.ccSkin = '1';
+
+        const el = (tag, cls, component) => {
+            const n = document.createElement(tag);
+            if (cls) n.className = cls;
+            if (component) n.setAttribute('data-component', component);
+            return n;
+        };
+        const VAULT_SVG =
+            '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
+            ' stroke-width="1.8" stroke-linecap="round" aria-hidden="true">' +
+            '<rect x="3" y="4" width="18" height="15" rx="2.5"/>' +
+            '<circle cx="12" cy="11.5" r="3.4"/>' +
+            '<path d="M12 8.1V6.3M12 16.7v-1.8M15.4 11.5h1.8M6.8 11.5h1.8"/>' +
+            '<path d="M6.5 19v2M17.5 19v2"/></svg>';
+
+        // 1. bottom-sheet grabber (CSS shows it ≤700px)
+        modal.insertBefore(el('div', 'cc-skin-grip', 'wallet-sheet-grip'), modal.firstChild);
+
+        // 2. app logo (config.icon) or a vault tile in the accent, above the title
+        const header = modal.querySelector('.cc-header');
+        if (header) {
+            const tile = el('div', 'cc-skin-appicon', 'wallet-app-icon');
+            if (this.config.icon) {
+                const img = document.createElement('img');
+                img.alt = '';
+                img.addEventListener('error', () => { img.remove(); tile.innerHTML = VAULT_SVG; });
+                img.src = this.config.icon;
+                tile.appendChild(img);
+            } else {
+                tile.innerHTML = VAULT_SVG;
+            }
+            header.insertBefore(tile, header.firstChild);
+        }
+
+        // 3. "Protected by <brand>" footer
+        if (this.config.brand !== false) {
+            const badge = el('div', 'cc-skin-badge', 'wallet-protected-by');
+            const shield = document.createElement('span');
+            shield.innerHTML =
+                '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+                '<path d="M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5l8-3z"/></svg>';
+            const brand = document.createElement('b');
+            brand.textContent = this.config.brand || 'ProofNetwork';
+            badge.append(shield, 'Protected by ', brand);
+            modal.appendChild(badge);
+        }
+
+        // 4. sun/moon toggle, top-left (mirrors the close circle)
+        const themeBtn = el('button', 'cc-skin-theme', 'wallet-theme-toggle');
+        themeBtn.type = 'button';
+        themeBtn.setAttribute('aria-label', 'Toggle dark mode');
+        themeBtn.addEventListener('click', () => {
+            const dark = document.documentElement.getAttribute('data-cc-wallet-theme') === 'dark';
+            this.setWalletTheme(dark ? 'light' : 'dark');
+        });
+        modal.appendChild(themeBtn);
+
+        // 5. "current wallet" strip at the top of the burner manager. The burner
+        //    view is rebuilt with replaceChildren() on every open, so re-insert
+        //    after each render.
+        const burnerView = document.getElementById('cc-burner-view');
+        const shortAddr = (a) => (a && a.length > 10 ? a.slice(0, 4) + '…' + a.slice(-4) : a || '');
+        const insertCurrent = () => {
+            if (!burnerView || burnerView.querySelector('.cc-skin-current')) return;
+            const bh = burnerView.querySelector('.cc-burner-header');
+            if (!bh) return;
+            const st = this.state || {};
+            if (!st.isConnected || !st.walletAddress) return;
+            let name;
+            if (st.activeWallet === 'burner') {
+                const w = CryptoClient.getBurnerWallets().find((x) => x.publicKey === st.walletAddress);
+                name = (w && w.name) || 'Burner Wallet';
+            } else {
+                name = (CryptoClient.WALLETS[st.activeWallet] && CryptoClient.WALLETS[st.activeWallet].name) || 'Wallet';
+            }
+            const strip = el('div', 'cc-skin-current', 'wallet-current');
+            const info = el('div', 'cc-skin-current-info');
+            const nm = document.createElement('b');
+            nm.textContent = name;
+            const ad = document.createElement('span');
+            ad.textContent = shortAddr(st.walletAddress);
+            info.append(nm, ad);
+            const tag = el('span', 'cc-skin-current-tag');
+            tag.textContent = 'Current';
+            strip.append(el('span', 'cc-skin-current-dot'), info, tag);
+            bh.insertAdjacentElement('afterend', strip);
+        };
+        if (burnerView) {
+            new MutationObserver(insertCurrent).observe(burnerView, { childList: true });
+            insertCurrent();
+        }
+
+        // 6. connect interstitial: spinner → green check + "Connected to <wallet>".
+        //    onConnectSuccess writes "Connecting to X..." / "Connected!" into
+        //    #cc-status and hides the overlay ~600ms later with no feedback, so
+        //    this keys off the status text and holds the overlay open until the
+        //    check has shown. A silent connect (overlay not open) gets no theatre.
+        const success = el('div', 'cc-skin-success', 'wallet-connect-success');
+        const check = el('div', 'cc-skin-success-check');
+        check.innerHTML =
+            '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
+            ' stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+            '<path d="M4.5 12.5l5 5 10-11"/></svg>';
+        const successLabel = el('div', 'cc-skin-success-label');
+        success.append(el('div', 'cc-skin-success-spin'), check, successLabel);
+        modal.appendChild(success);
+
+        const statusEl = document.getElementById('cc-status');
+        let holdObs = null;
+        let phase = 0; // 0 idle · 1 connecting · 2 connected
+        let walName = 'wallet';
+        const dismiss = () => {
+            success.classList.remove('is-on', 'is-done');
+            phase = 0;
+            if (holdObs) { holdObs.disconnect(); holdObs = null; }
+        };
+        const begin = (label) => {
+            successLabel.textContent = label;
+            success.classList.add('is-on');
+            holdObs = new MutationObserver(() => {
+                if (!backdrop.classList.contains('visible')) backdrop.classList.add('visible');
+            });
+            holdObs.observe(backdrop, { attributes: true, attributeFilter: ['class'] });
+        };
+        const statusObs = new MutationObserver(() => {
+            const txt = (statusEl.textContent || '').trim();
+            const m = /^connecting to (.+?)\.{0,3}$/i.exec(txt);
+            if (m && phase === 0 && backdrop.classList.contains('visible')) {
+                phase = 1;
+                walName = m[1];
+                begin('Connecting to ' + walName + '…');
+            } else if (/^connected!?$/i.test(txt) && phase < 2) {
+                if (phase === 0) {
+                    // instant (burner) connect: both writes land in one batch
+                    if (!backdrop.classList.contains('visible')) return;
+                    const w = CryptoClient.WALLETS[(this.state && this.state.activeWallet) || ''];
+                    walName = (w && w.name) || 'wallet';
+                    begin('Connecting to ' + walName + '…');
+                }
+                phase = 2;
+                setTimeout(() => {
+                    successLabel.textContent = 'Connected to ' + walName;
+                    success.classList.add('is-done');
+                }, 600);
+                setTimeout(() => {
+                    if (holdObs) { holdObs.disconnect(); holdObs = null; } // stop the hold first
+                    backdrop.classList.remove('visible');
+                    setTimeout(dismiss, 400);
+                }, 1900);
+            } else if (phase === 1 && txt && !/^connect/i.test(txt)) {
+                dismiss(); // failed: reveal the dialog and the library's error
+            }
+        });
+        if (statusEl) statusObs.observe(statusEl, { childList: true, characterData: true, subtree: true });
+    }
+
+    // ==================== END PRIVY SKIN ====================
+
     /**
      * Create the header connect button
      */
@@ -6089,7 +7704,9 @@ class CryptoClient {
     static get SYNDICA_RPC() {
         const pool = window.solRpcPool;
         if (pool && typeof pool.pickUrl === 'function') return pool.pickUrl();
-        return 'https://api.mainnet-beta.solana.com';
+        // No pool loaded: ProofNetwork's own proxy (api.mainnet-beta.solana.com
+        // answers 403 to every browser Origin; the proxy serves it server-side).
+        return 'https://proofnetwork.lol/rpc';
     }
 
     /**
