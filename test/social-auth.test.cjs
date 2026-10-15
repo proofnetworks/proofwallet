@@ -78,7 +78,7 @@ test('blocked popup, disabled transport/provider and insecure endpoints reject',
     assert.equal(disabled.listeners.size, 0);
 });
 
-test('cancel and window closure reject without retaining listeners or identity', async () => {
+test('explicit cancel clears listeners; COOP closed flag does not cancel authentication', async () => {
     const s = setup(), pending = s.auth.signIn('google');
     const rejected = assert.rejects(pending, /cancelled/);
     s.auth.cancel();
@@ -86,9 +86,12 @@ test('cancel and window closure reject without retaining listeners or identity',
     assert.equal(s.listeners.size, 0);
     assert.equal(s.auth.session, null);
     const next = s.auth.signIn('google');
-    const closed = assert.rejects(next, /cancelled/);
+    const url = await s.ready();
     s.popups.at(-1).closed = true;
-    await closed;
+    await new Promise(resolve => setTimeout(resolve, 350));
+    assert.equal(s.listeners.size, 1);
+    await s.message({ type: 'proofwallet:oauth-result', requestId: url.searchParams.get('request_id'), receipt: 'r'.repeat(43) });
+    assert.equal((await next).identity.provider, 'google');
     assert.equal(s.listeners.size, 0);
 });
 

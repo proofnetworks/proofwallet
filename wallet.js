@@ -595,7 +595,6 @@ class ProofWalletSocialAuth {
             const finish = (error, value) => {
                 if (done) return;
                 done = true;
-                clearInterval(closedTimer);
                 clearTimeout(timeout);
                 window.removeEventListener('message', receive);
                 controller.abort();
@@ -614,7 +613,7 @@ class ProofWalletSocialAuth {
                 if (done || completing || event.origin !== this.endpoint || event.source !== popup) return;
                 const data = event.data;
                 if (!data || data.type !== 'proofwallet:oauth-result' || data.requestId !== requestId) return;
-                if (data.error) { finish(new Error('sign_in_cancelled')); return; }
+                if (data.error) { finish(new Error(data.error === 'sign_in_cancelled' ? 'sign_in_cancelled' : 'sign_in_failed')); return; }
                 if (typeof data.receipt !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(data.receipt)) return;
                 completing = true;
                 try {
@@ -633,7 +632,8 @@ class ProofWalletSocialAuth {
                     } else finish(null, result);
                 } catch (error) { finish(error); }
             };
-            const closedTimer = setInterval(() => { if (!completing && popup.closed) cancel(); }, 250);
+            // COOP can make a provider popup appear closed while sign-in is
+            // still active. Use explicit cancellation and the deadline instead.
             const timeout = setTimeout(() => finish(new Error('sign_in_timeout')), 10 * 60 * 1000);
             this._cancel = cancel;
             window.addEventListener('message', receive);
@@ -761,7 +761,7 @@ class CryptoClient {
             if (generation !== this._socialGeneration) return;
             this._clearSocialWallet();
             void this.socialAuth.signOut().catch(() => {});
-            const messages = { popup_blocked: 'Allow popups, then try again.', sign_in_cancelled: 'Sign-in cancelled.', provider_not_configured: 'This sign-in option is not available yet.', sign_in_timeout: 'Sign-in timed out. Try again.' };
+            const messages = { popup_blocked: 'Allow popups, then try again.', sign_in_cancelled: 'Sign-in cancelled.', sign_in_failed: 'Sign-in could not be completed. Please try again.', provider_not_configured: 'This sign-in option is not available yet.', sign_in_timeout: 'Sign-in timed out. Try again.' };
             this.updateStatus(messages[error.message] || 'Unable to restore wallet. Please sign in again.', true);
         } finally {
             if (generation === this._socialGeneration) this.state.isConnecting = false;
