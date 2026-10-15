@@ -63,24 +63,24 @@ That's it for setup. For real flows, read **Calling contracts** below.
 
 ## Configuration
 
-### Google and X identity authentication (preview)
+### Google and X wallets
 
-The built-in `wallet.socialAuth` transport connects to `https://auth.proofnetwork.lol`:
+The wallet picker includes Google and X when configured at `https://auth.proofnetwork.lol`. Signing in creates or recovers the same managed Solana wallet, without a separate password:
 
 ```js
 // Call directly from a user click so the browser permits the popup.
-const identitySession = await wallet.socialAuth.signIn('google'); // or 'x'
+await wallet.connectWallet('google'); // or 'x'; emits walletConnected after recovery
 const available = await wallet.socialAuth.providers();
-await wallet.socialAuth.signOut();
+wallet.disconnect();
 ```
 
-This preview authenticates a social identity. **It does not yet create, restore or connect a signing wallet**, and does not emit `walletConnected`. Wallet custody/recovery and the connect-picker UI are pending. Provider availability stays false until the service's Google/X OAuth app credentials are configured, and the service must explicitly allow your application's origin. Google and X identities are separate; they are never merged by email or username.
+ProofNetwork stores an encrypted recovery seed, with its encryption key kept separately in Worker secrets. The SDK recovers over HTTPS, verifies the wallet address, and holds the signer in memory. It signs messages and legacy/versioned transactions through the normal wallet API and existing pooled RPC path. Signing asks for confirmation. The service must explicitly allow your application's origin; approved applications receive signing keys and must be trusted. Google and X identities are separate unless explicitly linked through the connected-wallet manager. Linking requires recent authentication to both accounts and cannot replace either account's existing wallet. After five minutes, sign out/in before linking.
 
 Configure via `new CryptoClient({ socialAuth: { endpoint: 'https://auth.proofnetwork.lol' } })`, or disable with `socialAuth: false`. ProofFront passes `config.wallet.socialAuth` through unchanged and exposes the transport on its wallet API. The endpoint must be an HTTPS origin. Add it to the application's CSP `connect-src` allowlist if needed.
 
-Sessions last 15 minutes and stay in memory. No private keys or provider credentials enter this transport. `socialAuth.session` returns the current session or null after expiry; `socialAuth.cancel()` cancels pending sign-in. Disconnecting the wallet also clears/revokes its social session. Blocked popups, closed windows, unavailable providers, cancellation and timeout reject the sign-in promise; applications should show a retry action. Browser opener isolation can prevent completion and fails closed.
+Sessions last 15 minutes. Neither sessions nor recovered signing keys are written to localStorage. Disconnect/expiry clear the active signer; sign in again after reload. `socialAuth.session` returns the current identity session or null; `socialAuth.cancel()` cancels pending OAuth. Disconnecting also revokes the social session. Blocked popups, cancellation, unavailable providers, invalid recovery and timeout leave the wallet disconnected with a retry message. Browser opener isolation can prevent completion and fails closed. The lower-level `socialAuth.signIn()` remains available for identity-only flows and does not connect a wallet by itself.
 
-Run transport checks with `node --check wallet.js` and `node --test test/social-auth.test.cjs`.
+Run `npm ci`, `npm run check`, and `npm test`. No build is required to use the SDK. Try the hosted wallet at https://auth.proofnetwork.lol/wallet.
 
 ```javascript
 new CryptoClient({

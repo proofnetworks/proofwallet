@@ -545,8 +545,8 @@ const patchSolanaConnection = (function () {
  * Reusable Crypto Client Class
  * Multi-wallet support with Apple-inspired UI.
  */
-// Google/X identity transport. Authentication does not create or unlock a signer.
-// Tokens stay in memory; walletConnected remains reserved for an actual wallet.
+// Google/X identity and wallet recovery transport. Tokens stay in memory;
+// CryptoClient emits walletConnected only after recovering a usable signer.
 class ProofWalletSocialAuth {
     constructor(config = {}) {
         this.enabled = config !== false;
@@ -652,8 +652,35 @@ class ProofWalletSocialAuth {
 
     cancel() { if (this._cancel) this._cancel(); }
 
+    async recoverWallet() {
+        const current = this.session;
+        if (!current) throw new Error('fresh_sign_in_required');
+        return this._request('/v1/wallet/recover', { method: 'POST', headers: { Authorization: `Bearer ${current.token}` } });
+    }
+
+    async linkAccount(provider, publicKey) {
+        const current = this.session;
+        if (!current || current.expiresAt - Date.now() < 10 * 60 * 1000) throw new Error('fresh_sign_in_required');
+        if (current.identity.provider === provider) throw new Error('different_provider_required');
+        const target = new ProofWalletSocialAuth({ endpoint: this.endpoint });
+        const pending = target.signIn(provider); // Keep popup creation in the click handler.
+        this._linkTarget = target;
+        try {
+            const proof = await pending;
+            if (this.session?.token !== current.token) throw new Error('sign_in_cancelled');
+            return await this._request('/v1/wallet/link', {
+                method: 'POST', headers: { Authorization: `Bearer ${current.token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ targetSession: proof.token, publicKey }),
+            });
+        } finally {
+            this._linkTarget = null;
+            await target.signOut().catch(() => {});
+        }
+    }
+
     async signOut() {
         this.cancel();
+        this._linkTarget?.cancel();
         const current = this._session;
         this._session = null;
         if (current) await this._request('/v1/session', { method: 'DELETE', headers: { Authorization: `Bearer ${current.token}` } });
@@ -661,6 +688,134 @@ class ProofWalletSocialAuth {
 }
 
 class CryptoClient {
+    static SOCIAL_WALLETS = Object.fromEntries([['google', 'Google', 'G'], ['x', 'X', '𝕏']].map(([id, name, letter]) => [id, {
+        name,
+        icon: 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><rect width="48" height="48" rx="12" fill="#15231e"/><text x="24" y="33" text-anchor="middle" fill="#c1fbe0" font-family="Arial,sans-serif" font-size="30">${letter}</text></svg>`),
+    }]));
+
+    _clearSocialWallet() {
+        this._socialGeneration = (this._socialGeneration || 0) + 1;
+        clearTimeout(this._socialExpiry);
+        this._socialSigner = null;
+        this._socialProvider = null;
+        if (this._socialPending) this.state.isConnecting = false;
+        this._socialPending = false;
+        this.socialAuth.cancel();
+    }
+
+    async connectSocialWallet(providerId) {
+        if (this.state.isConnecting) return;
+        this.disconnect();
+        this.showOverlay();
+        const generation = this._socialGeneration;
+        this._socialPending = true;
+        this.state.isConnecting = true;
+        this.updateStatus(`Connecting to ${CryptoClient.SOCIAL_WALLETS[providerId].name}...`);
+        try {
+            const authenticated = await this.socialAuth.signIn(providerId);
+            await this.solanaWeb3Ready;
+            if (generation !== this._socialGeneration) return;
+            const recovered = await this.socialAuth.recoverWallet();
+            if (generation !== this._socialGeneration) return;
+            if (typeof recovered.seed !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(recovered.seed)) throw new Error('invalid_wallet_response');
+            const seed = Uint8Array.from(atob(recovered.seed.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+            let signer;
+            try { signer = window.solanaWeb3.Keypair.fromSeed(seed); }
+            finally { seed.fill(0); delete recovered.seed; }
+            if (signer.publicKey.toBase58() !== recovered.publicKey) throw new Error('wallet_address_mismatch');
+            this._socialSigner = signer;
+            const publicKey = signer.publicKey;
+            signer = null;
+            const liveSigner = () => {
+                if (generation !== this._socialGeneration || this.socialAuth.session?.token !== authenticated.token || !this._socialSigner) throw new Error('wallet_session_expired');
+                return this._socialSigner;
+            };
+            this._socialProvider = {
+                publicKey,
+                signMessage: async message => {
+                    liveSigner();
+                    if (!window.confirm(`Allow ${this.config.appName} to sign this message with ${publicKey.toBase58()}?\n\n${new TextDecoder().decode(message)}`)) throw new Error('User rejected message signature');
+                    const signature = await CryptoClient.signWithKeypair(message, liveSigner());
+                    liveSigner();
+                    return { signature, publicKey };
+                },
+                signTransaction: async transaction => {
+                    liveSigner();
+                    if (!window.confirm(`Allow ${this.config.appName} to sign this Solana transaction with ${publicKey.toBase58()}? Only approve a transaction you requested in this app.`)) throw new Error('User rejected transaction signature');
+                    const active = liveSigner();
+                    if (transaction instanceof window.solanaWeb3.VersionedTransaction) transaction.sign([active]);
+                    else transaction.partialSign(active); // Preserve any existing co-signers.
+                    return transaction;
+                },
+            };
+            if (this.config.onVerify) await this.config.onVerify(recovered.publicKey, this._socialProvider);
+            liveSigner();
+            this.state.walletAddress = recovered.publicKey;
+            this._socialPending = false;
+            this.setLastUsedWallet(providerId);
+            this.onConnectSuccess(recovered.publicKey, providerId);
+            this._socialExpiry = setTimeout(() => {
+                if (generation === this._socialGeneration) this.disconnect();
+            }, Math.max(0, authenticated.expiresAt - Date.now()));
+        } catch (error) {
+            if (generation !== this._socialGeneration) return;
+            this._clearSocialWallet();
+            void this.socialAuth.signOut().catch(() => {});
+            const messages = { popup_blocked: 'Allow popups, then try again.', sign_in_cancelled: 'Sign-in cancelled.', provider_not_configured: 'This sign-in option is not available yet.', sign_in_timeout: 'Sign-in timed out. Try again.' };
+            this.updateStatus(messages[error.message] || 'Unable to restore wallet. Please sign in again.', true);
+        } finally {
+            if (generation === this._socialGeneration) this.state.isConnecting = false;
+        }
+    }
+
+    renderSocialWallets(container) {
+        if (!this.socialAuth.enabled) return;
+        const section = document.createElement('div');
+        section.dataset.component = 'social-wallet-options';
+        section.style.display = 'contents';
+        container.appendChild(section);
+        void this.socialAuth.providers().then(available => {
+            if (!section.isConnected) return;
+            for (const id of ['google', 'x']) {
+                if (!available[id]) continue;
+                const option = CryptoClient.SOCIAL_WALLETS[id];
+                const button = document.createElement('button');
+                button.dataset.component = `social-connect-${id}`;
+                button.className = 'cc-wallet-btn';
+                button.type = 'button';
+                const icon = document.createElement('img');
+                icon.dataset.component = `social-icon-${id}`;
+                icon.className = 'cc-wallet-icon'; icon.src = option.icon; icon.alt = '';
+                const label = document.createElement('span');
+                label.dataset.component = `social-label-${id}`;
+                label.className = 'cc-wallet-name'; label.textContent = `Continue with ${option.name}`;
+                button.append(icon, label);
+                button.addEventListener('click', () => { void this.connectWallet(id); });
+                section.appendChild(button);
+            }
+        }).catch(() => {});
+    }
+
+    renderSocialLink(container) {
+        if (!CryptoClient.SOCIAL_WALLETS[this.state.activeWallet]) return;
+        const other = this.state.activeWallet === 'google' ? 'x' : 'google';
+        const button = document.createElement('button');
+        button.dataset.component = 'social-link-account'; button.type = 'button'; button.className = 'cc-wallet-btn';
+        button.textContent = `Link ${CryptoClient.SOCIAL_WALLETS[other].name} to this wallet`;
+        button.addEventListener('click', async () => {
+            if (!window.confirm(`Allow this ${CryptoClient.SOCIAL_WALLETS[other].name} account to recover wallet ${this.state.walletAddress}?`)) return;
+            button.disabled = true;
+            try {
+                await this.socialAuth.linkAccount(other, this.state.walletAddress);
+                button.textContent = `${CryptoClient.SOCIAL_WALLETS[other].name} linked`;
+            } catch (error) {
+                const messages = { fresh_sign_in_required: 'Sign out and sign in again before linking.', account_already_has_wallet: 'That account already has a different wallet.', account_link_conflict: 'A different account is already linked.' };
+                this.updateStatus(messages[error.message] || 'Account linking was not completed. Try again.', true);
+                button.disabled = false;
+            }
+        });
+        container.appendChild(button);
+    }
     // Supported wallets configuration
     static WALLETS = {
         phantom: {
@@ -6096,6 +6251,8 @@ class CryptoClient {
         // Clear existing
         container.replaceChildren();
 
+        this.renderSocialWallets(container);
+
         let wallets = this.detectWallets();
         const privy = this.config.skin === 'privy';
 
@@ -6203,7 +6360,7 @@ class CryptoClient {
 
         container.replaceChildren();
 
-        const walletConfig = CryptoClient.WALLETS[this.state.activeWallet];
+        const walletConfig = CryptoClient.SOCIAL_WALLETS[this.state.activeWallet] || CryptoClient.WALLETS[this.state.activeWallet];
         const burnerWallets = CryptoClient.getBurnerWallets();
         const privy = this.config.skin === 'privy';
 
@@ -6290,6 +6447,8 @@ class CryptoClient {
             this.loadSkinBalance(addr, balanceValue);
         }
         container.appendChild(walletInfo);
+
+        this.renderSocialLink(container);
 
         // Quick actions section
         const quickActions = document.createElement('div');
@@ -9446,6 +9605,7 @@ class CryptoClient {
     }
 
     hideOverlay() {
+        if (this._socialPending) this._clearSocialWallet();
         const backdrop = document.getElementById('cc-wallet-modal');
         if (backdrop) {
             backdrop.classList.remove('visible');
@@ -9555,6 +9715,7 @@ class CryptoClient {
      */
     async connectWallet(walletId = 'phantom') {
         if (this.state.isConnecting) return;
+        if (CryptoClient.SOCIAL_WALLETS[walletId]) return this.connectSocialWallet(walletId);
 
         const walletConfig = CryptoClient.WALLETS[walletId];
         if (!walletConfig) {
@@ -9732,13 +9893,18 @@ class CryptoClient {
      * Handle successful wallet connection
      */
     onConnectSuccess(publicKey, walletId) {
+        if (!CryptoClient.SOCIAL_WALLETS[walletId]) {
+            this._clearSocialWallet();
+            void this.socialAuth.signOut().catch(() => {});
+        }
         this.state.isConnected = true;
         this.state.activeWallet = walletId;
         this.updateStatus('Connected!', false);
 
-        const walletName = CryptoClient.WALLETS[walletId]?.name || walletId;
+        const walletName = CryptoClient.SOCIAL_WALLETS[walletId]?.name || CryptoClient.WALLETS[walletId]?.name || walletId;
 
         setTimeout(() => {
+            if (!this.state.isConnected || this.state.activeWallet !== walletId || this.state.walletAddress !== publicKey) return;
             this.hideOverlay();
             this.updateHeaderButton(publicKey);
 
@@ -9755,6 +9921,7 @@ class CryptoClient {
      * Disconnect from current wallet
      */
     disconnect() {
+        this._clearSocialWallet();
         void this.socialAuth.signOut().catch(() => {});
         // Disconnect from active wallet provider
         if (this.state.activeWallet) {
@@ -9766,6 +9933,7 @@ class CryptoClient {
         }
 
         this.state.isConnected = false;
+        this.state.isConnecting = false;
         this.state.walletAddress = null;
         this.state.activeWallet = null;
 
@@ -9785,6 +9953,7 @@ class CryptoClient {
      */
     getProvider() {
         if (!this.state.activeWallet) return null;
+        if (CryptoClient.SOCIAL_WALLETS[this.state.activeWallet]) return this.socialAuth.session ? this._socialProvider : null;
         return CryptoClient.WALLETS[this.state.activeWallet]?.getProvider();
     }
 

@@ -1,0 +1,9 @@
+{
+  "name": "proofwallet",
+  "private": true,
+  "scripts": {
+    "check": "node --check wallet.js",
+    "test": "node --test test/*.test.cjs"
+  },
+  "devDependencies": { "@solana/web3.js": "1.98.4" }
+}
