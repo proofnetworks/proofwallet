@@ -63,6 +63,25 @@ That's it for setup. For real flows, read **Calling contracts** below.
 
 ## Configuration
 
+### Google and X identity authentication (preview)
+
+The built-in `wallet.socialAuth` transport connects to `https://auth.proofnetwork.lol`:
+
+```js
+// Call directly from a user click so the browser permits the popup.
+const identitySession = await wallet.socialAuth.signIn('google'); // or 'x'
+const available = await wallet.socialAuth.providers();
+await wallet.socialAuth.signOut();
+```
+
+This preview authenticates a social identity. **It does not yet create, restore or connect a signing wallet**, and does not emit `walletConnected`. Wallet custody/recovery and the connect-picker UI are pending. Provider availability stays false until the service's Google/X OAuth app credentials are configured, and the service must explicitly allow your application's origin. Google and X identities are separate; they are never merged by email or username.
+
+Configure via `new CryptoClient({ socialAuth: { endpoint: 'https://auth.proofnetwork.lol' } })`, or disable with `socialAuth: false`. ProofFront passes `config.wallet.socialAuth` through unchanged and exposes the transport on its wallet API. The endpoint must be an HTTPS origin. Add it to the application's CSP `connect-src` allowlist if needed.
+
+Sessions last 15 minutes and stay in memory. No private keys or provider credentials enter this transport. `socialAuth.session` returns the current session or null after expiry; `socialAuth.cancel()` cancels pending sign-in. Disconnecting the wallet also clears/revokes its social session. Blocked popups, closed windows, unavailable providers, cancellation and timeout reject the sign-in promise; applications should show a retry action. Browser opener isolation can prevent completion and fails closed.
+
+Run transport checks with `node --check wallet.js` and `node --test test/social-auth.test.cjs`.
+
 ```javascript
 new CryptoClient({
   contractAddress: string,      // ProofNetwork contract address (0x… or named)

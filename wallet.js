@@ -545,6 +545,121 @@ const patchSolanaConnection = (function () {
  * Reusable Crypto Client Class
  * Multi-wallet support with Apple-inspired UI.
  */
+// Google/X identity transport. Authentication does not create or unlock a signer.
+// Tokens stay in memory; walletConnected remains reserved for an actual wallet.
+class ProofWalletSocialAuth {
+    constructor(config = {}) {
+        this.enabled = config !== false;
+        const endpoint = new URL(config.endpoint || 'https://auth.proofnetwork.lol');
+        if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.pathname !== '/' || endpoint.search || endpoint.hash) {
+            throw new Error('Social auth endpoint must be an HTTPS origin');
+        }
+        this.endpoint = endpoint.origin;
+        this._session = null;
+        this._cancel = null;
+    }
+
+    get session() {
+        if (this._session && this._session.expiresAt <= Date.now()) this._session = null;
+        return this._session ? { ...this._session, identity: { ...this._session.identity } } : null;
+    }
+
+    async providers() {
+        if (!this.enabled) return { google: false, x: false };
+        return this._request('/v1/providers');
+    }
+
+    async _request(path, options = {}) {
+        const response = await fetch(this.endpoint + path, {
+            ...options, credentials: 'omit', cache: 'no-store', redirect: 'error',
+            signal: options.signal || AbortSignal.timeout(15000),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'social_auth_unavailable');
+        return data;
+    }
+
+    signIn(provider) {
+        if (!this.enabled) return Promise.reject(new Error('social_auth_disabled'));
+        if (!['google', 'x'].includes(provider)) return Promise.reject(new Error('invalid_provider'));
+        if (this._cancel) this._cancel();
+        // Open synchronously from the click, before any crypto/network await.
+        const popup = window.open('about:blank', '_blank', 'popup,width=500,height=700');
+        if (!popup) return Promise.reject(new Error('popup_blocked'));
+        const encode = bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        const requestId = encode(crypto.getRandomValues(new Uint8Array(32)));
+        const verifier = encode(crypto.getRandomValues(new Uint8Array(32)));
+        return new Promise((resolve, reject) => {
+            let done = false, completing = false;
+            const controller = new AbortController();
+            const finish = (error, value) => {
+                if (done) return;
+                done = true;
+                clearInterval(closedTimer);
+                clearTimeout(timeout);
+                window.removeEventListener('message', receive);
+                controller.abort();
+                try { popup.close(); } catch (_) {}
+                if (this._cancel === cancel) this._cancel = null;
+                if (error) reject(error);
+                else {
+                    const previous = this._session;
+                    this._session = value;
+                    if (previous) void this._request('/v1/session', { method: 'DELETE', headers: { Authorization: `Bearer ${previous.token}` } }).catch(() => {});
+                    resolve(this.session);
+                }
+            };
+            const cancel = () => finish(new Error('sign_in_cancelled'));
+            const receive = async event => {
+                if (done || completing || event.origin !== this.endpoint || event.source !== popup) return;
+                const data = event.data;
+                if (!data || data.type !== 'proofwallet:oauth-result' || data.requestId !== requestId) return;
+                if (data.error) { finish(new Error('sign_in_cancelled')); return; }
+                if (typeof data.receipt !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(data.receipt)) return;
+                completing = true;
+                try {
+                    const result = await this._request('/v1/result', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ requestId, verifier, receipt: data.receipt }),
+                        signal: controller.signal,
+                    });
+                    if (result.status !== 'authenticated' || !/^[A-Za-z0-9_-]{43}$/.test(result.token) ||
+                        !result.identity || result.identity.provider !== provider || !Number.isFinite(result.expiresAt) || result.expiresAt <= Date.now()) {
+                        throw new Error('invalid_auth_result');
+                    }
+                    if (done) {
+                        // A cancellation may race a completed redemption. Revoke it.
+                        void this._request('/v1/session', { method: 'DELETE', headers: { Authorization: `Bearer ${result.token}` } }).catch(() => {});
+                    } else finish(null, result);
+                } catch (error) { finish(error); }
+            };
+            const closedTimer = setInterval(() => { if (!completing && popup.closed) cancel(); }, 250);
+            const timeout = setTimeout(() => finish(new Error('sign_in_timeout')), 10 * 60 * 1000);
+            this._cancel = cancel;
+            window.addEventListener('message', receive);
+            Promise.all([
+                crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)),
+                this._request('/v1/providers', { signal: controller.signal }),
+            ]).then(([digest, providers]) => {
+                if (done) return;
+                if (providers[provider] !== true) throw new Error('provider_not_configured');
+                const url = new URL(this.endpoint + '/authorize');
+                url.search = new URLSearchParams({ provider, request_id: requestId, challenge: encode(new Uint8Array(digest)), origin: window.location.origin }).toString();
+                popup.location.replace(url.href);
+            }).catch(error => finish(error));
+        });
+    }
+
+    cancel() { if (this._cancel) this._cancel(); }
+
+    async signOut() {
+        this.cancel();
+        const current = this._session;
+        this._session = null;
+        if (current) await this._request('/v1/session', { method: 'DELETE', headers: { Authorization: `Bearer ${current.token}` } });
+    }
+}
+
 class CryptoClient {
     // Supported wallets configuration
     static WALLETS = {
@@ -1069,6 +1184,8 @@ class CryptoClient {
             isConnecting: false,
             activeWallet: null  // 'phantom' | 'solflare' | 'backpack' | 'jupiter' | 'burner'
         };
+
+        this.socialAuth = new ProofWalletSocialAuth(config.socialAuth ?? {});
 
         // Inject styles and create UI
         this.injectStyles();
@@ -9638,6 +9755,7 @@ class CryptoClient {
      * Disconnect from current wallet
      */
     disconnect() {
+        void this.socialAuth.signOut().catch(() => {});
         // Disconnect from active wallet provider
         if (this.state.activeWallet) {
             const walletConfig = CryptoClient.WALLETS[this.state.activeWallet];
