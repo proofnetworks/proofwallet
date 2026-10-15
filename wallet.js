@@ -545,7 +545,8 @@ const patchSolanaConnection = (function () {
  * Reusable Crypto Client Class
  * Multi-wallet support with Apple-inspired UI.
  */
-// Google/X identity and wallet recovery transport. Tokens stay in memory;
+// Google/X identity and wallet recovery transport. Short-lived ProofWallet
+// sessions can survive wallet switching/reloads in this tab's sessionStorage;
 // CryptoClient emits walletConnected only after recovering a usable signer.
 class ProofWalletSocialAuth {
     constructor(config = {}) {
@@ -555,13 +556,51 @@ class ProofWalletSocialAuth {
             throw new Error('Social auth endpoint must be an HTTPS origin');
         }
         this.endpoint = endpoint.origin;
+        this.rememberSession = config.rememberSession !== false;
+        this._sessions = new Map();
         this._session = null;
         this._cancel = null;
     }
 
     get session() {
-        if (this._session && this._session.expiresAt <= Date.now()) this._session = null;
+        if (this._session && this._session.expiresAt <= Date.now()) {
+            this._dropCached(this._session.identity.provider);
+            this._session = null;
+        }
         return this._session ? { ...this._session, identity: { ...this._session.identity } } : null;
+    }
+
+    _storageKey(provider) { return `proofwallet:session:v1:${this.endpoint}:${provider}`; }
+
+    _dropCached(provider) {
+        this._sessions.delete(provider);
+        if (this.rememberSession) {
+            try { window.sessionStorage.removeItem(this._storageKey(provider)); } catch (_) {}
+        }
+    }
+
+    _cached(provider) {
+        let value = this._sessions.get(provider);
+        if (!value && this.rememberSession) {
+            try { value = JSON.parse(window.sessionStorage.getItem(this._storageKey(provider))); } catch (_) {}
+        }
+        if (!value || typeof value.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.token) ||
+            !Number.isFinite(value.expiresAt) || value.expiresAt <= Date.now() ||
+            value.identity?.provider !== provider || typeof value.identity.id !== 'string') {
+            this._dropCached(provider);
+            return null;
+        }
+        return { token: value.token, expiresAt: value.expiresAt, identity: { id: value.identity.id, provider, name: String(value.identity.name || '') } };
+    }
+
+    _saveSession(value) {
+        const provider = value.identity.provider;
+        // Store only the opaque app session, never OAuth tokens or wallet keys.
+        const saved = { token: value.token, expiresAt: value.expiresAt, identity: { id: value.identity.id, provider, name: value.identity.name } };
+        this._sessions.set(provider, saved);
+        if (this.rememberSession) {
+            try { window.sessionStorage.setItem(this._storageKey(provider), JSON.stringify(saved)); } catch (_) {}
+        }
     }
 
     async providers() {
@@ -575,14 +614,23 @@ class ProofWalletSocialAuth {
             signal: options.signal || AbortSignal.timeout(15000),
         });
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'social_auth_unavailable');
+        if (!response.ok) {
+            const error = new Error(data.error || 'social_auth_unavailable');
+            error.status = response.status;
+            throw error;
+        }
         return data;
     }
 
-    signIn(provider) {
+    signIn(provider, { force = false } = {}) {
         if (!this.enabled) return Promise.reject(new Error('social_auth_disabled'));
         if (!['google', 'x'].includes(provider)) return Promise.reject(new Error('invalid_provider'));
         if (this._cancel) this._cancel();
+        const cached = this.rememberSession && !force ? this._cached(provider) : null;
+        if (cached) {
+            this._session = cached;
+            return Promise.resolve(this.session);
+        }
         // Open synchronously from the click, before any crypto/network await.
         const popup = window.open('about:blank', '_blank', 'popup,width=500,height=700');
         if (!popup) return Promise.reject(new Error('popup_blocked'));
@@ -602,8 +650,9 @@ class ProofWalletSocialAuth {
                 if (this._cancel === cancel) this._cancel = null;
                 if (error) reject(error);
                 else {
-                    const previous = this._session;
+                    const previous = this._cached(provider);
                     this._session = value;
+                    this._saveSession(value);
                     if (previous) void this._request('/v1/session', { method: 'DELETE', headers: { Authorization: `Bearer ${previous.token}` } }).catch(() => {});
                     resolve(this.session);
                 }
@@ -662,7 +711,7 @@ class ProofWalletSocialAuth {
         const current = this.session;
         if (!current || current.expiresAt - Date.now() < 10 * 60 * 1000) throw new Error('fresh_sign_in_required');
         if (current.identity.provider === provider) throw new Error('different_provider_required');
-        const target = new ProofWalletSocialAuth({ endpoint: this.endpoint });
+        const target = new ProofWalletSocialAuth({ endpoint: this.endpoint, rememberSession: false });
         const pending = target.signIn(provider); // Keep popup creation in the click handler.
         this._linkTarget = target;
         try {
@@ -678,12 +727,21 @@ class ProofWalletSocialAuth {
         }
     }
 
-    async signOut() {
+    async signOut(provider) {
         this.cancel();
         this._linkTarget?.cancel();
-        const current = this._session;
-        this._session = null;
-        if (current) await this._request('/v1/session', { method: 'DELETE', headers: { Authorization: `Bearer ${current.token}` } });
+        const providers = provider ? [provider] : ['google', 'x'];
+        const tokens = new Set();
+        for (const id of providers) {
+            const cached = this._cached(id);
+            if (cached) tokens.add(cached.token);
+            this._dropCached(id);
+        }
+        if (this._session && (!provider || this._session.identity.provider === provider)) {
+            tokens.add(this._session.token);
+            this._session = null;
+        }
+        await Promise.allSettled([...tokens].map(token => this._request('/v1/session', { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })));
     }
 }
 
@@ -705,7 +763,7 @@ class CryptoClient {
 
     async connectSocialWallet(providerId) {
         if (this.state.isConnecting) return;
-        this.disconnect();
+        this.disconnect({ preserveSocialSession: true });
         this.showOverlay();
         const generation = this._socialGeneration;
         this._socialPending = true;
@@ -755,13 +813,16 @@ class CryptoClient {
             this.setLastUsedWallet(providerId);
             this.onConnectSuccess(recovered.publicKey, providerId);
             this._socialExpiry = setTimeout(() => {
-                if (generation === this._socialGeneration) this.disconnect();
+                if (generation === this._socialGeneration) {
+                    void this.socialAuth.signOut(providerId).catch(() => {});
+                    this.disconnect({ preserveSocialSession: true });
+                }
             }, Math.max(0, authenticated.expiresAt - Date.now()));
         } catch (error) {
             if (generation !== this._socialGeneration) return;
             this._clearSocialWallet();
-            void this.socialAuth.signOut().catch(() => {});
-            const messages = { popup_blocked: 'Allow popups, then try again.', sign_in_cancelled: 'Sign-in cancelled.', sign_in_failed: 'Sign-in could not be completed. Please try again.', provider_not_configured: 'This sign-in option is not available yet.', sign_in_timeout: 'Sign-in timed out. Try again.' };
+            void this.socialAuth.signOut(providerId).catch(() => {});
+            const messages = { popup_blocked: 'Allow popups, then try again.', unauthorized: 'Your saved sign-in expired or was revoked. Choose your provider again to sign in.', fresh_sign_in_required: 'Your saved sign-in expired. Choose your provider again to sign in.', sign_in_cancelled: 'Sign-in cancelled.', sign_in_failed: 'Sign-in could not be completed. Please try again.', provider_not_configured: 'This sign-in option is not available yet.', sign_in_timeout: 'Sign-in timed out. Try again.' };
             this.updateStatus(messages[error.message] || 'Unable to restore wallet. Please sign in again.', true);
         } finally {
             if (generation === this._socialGeneration) this.state.isConnecting = false;
@@ -5977,11 +6038,14 @@ class CryptoClient {
         let holdObs = null;
         let phase = 0; // 0 idle · 1 connecting · 2 connected
         let walName = 'wallet';
+        let checkTimer, closeTimer, dismissTimer;
         const dismiss = () => {
+            clearTimeout(checkTimer); clearTimeout(closeTimer); clearTimeout(dismissTimer);
             success.classList.remove('is-on', 'is-done');
             phase = 0;
             if (holdObs) { holdObs.disconnect(); holdObs = null; }
         };
+        this._dismissSkinConnect = dismiss;
         const begin = (label) => {
             successLabel.textContent = label;
             success.classList.add('is-on');
@@ -5991,6 +6055,9 @@ class CryptoClient {
             holdObs.observe(backdrop, { attributes: true, attributeFilter: ['class'] });
         };
         const statusObs = new MutationObserver(() => {
+            // Burner selection returns directly to the manager, with no delayed
+            // success layer allowed to intercept clicks or close that manager.
+            if (this.state.activeWallet === 'burner') { dismiss(); return; }
             const txt = (statusEl.textContent || '').trim();
             const m = /^connecting to (.+?)\.{0,3}$/i.exec(txt);
             if (m && phase === 0 && backdrop.classList.contains('visible')) {
@@ -6006,14 +6073,14 @@ class CryptoClient {
                     begin('Connecting to ' + walName + '…');
                 }
                 phase = 2;
-                setTimeout(() => {
+                checkTimer = setTimeout(() => {
                     successLabel.textContent = 'Connected to ' + walName;
                     success.classList.add('is-done');
                 }, 600);
-                setTimeout(() => {
+                closeTimer = setTimeout(() => {
                     if (holdObs) { holdObs.disconnect(); holdObs = null; } // stop the hold first
                     backdrop.classList.remove('visible');
-                    setTimeout(dismiss, 400);
+                    dismissTimer = setTimeout(dismiss, 400);
                 }, 1900);
             } else if (phase === 1 && txt && !/^connect/i.test(txt)) {
                 dismiss(); // failed: reveal the dialog and the library's error
@@ -9567,6 +9634,7 @@ class CryptoClient {
     }
 
     showOverlay() {
+        this._dismissSkinConnect?.();
         const backdrop = document.getElementById('cc-wallet-modal');
         const walletList = document.getElementById('cc-wallet-list');
         const connectedView = document.getElementById('cc-connected-view');
@@ -9604,7 +9672,8 @@ class CryptoClient {
         backdrop.classList.add('visible');
     }
 
-    hideOverlay() {
+    hideOverlay({ preserveConnectAnimation = false } = {}) {
+        if (!preserveConnectAnimation) this._dismissSkinConnect?.();
         if (this._socialPending) this._clearSocialWallet();
         const backdrop = document.getElementById('cc-wallet-modal');
         if (backdrop) {
@@ -9895,7 +9964,6 @@ class CryptoClient {
     onConnectSuccess(publicKey, walletId) {
         if (!CryptoClient.SOCIAL_WALLETS[walletId]) {
             this._clearSocialWallet();
-            void this.socialAuth.signOut().catch(() => {});
         }
         this.state.isConnected = true;
         this.state.activeWallet = walletId;
@@ -9905,7 +9973,10 @@ class CryptoClient {
 
         setTimeout(() => {
             if (!this.state.isConnected || this.state.activeWallet !== walletId || this.state.walletAddress !== publicKey) return;
-            this.hideOverlay();
+            // Keep a user-opened manager visible, but never open it for silent
+            // burner selection (ProofFront also selects wallets in background).
+            if (walletId === 'burner' && document.getElementById('cc-wallet-modal')?.classList.contains('visible')) this.showOverlay();
+            else this.hideOverlay({ preserveConnectAnimation: walletId !== 'burner' });
             this.updateHeaderButton(publicKey);
 
             const event = new CustomEvent('walletConnected', {
@@ -9920,9 +9991,9 @@ class CryptoClient {
     /**
      * Disconnect from current wallet
      */
-    disconnect() {
+    disconnect({ preserveSocialSession = false } = {}) {
         this._clearSocialWallet();
-        void this.socialAuth.signOut().catch(() => {});
+        if (!preserveSocialSession) void this.socialAuth.signOut().catch(() => {});
         // Disconnect from active wallet provider
         if (this.state.activeWallet) {
             const walletConfig = CryptoClient.WALLETS[this.state.activeWallet];

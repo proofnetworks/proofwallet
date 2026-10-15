@@ -9,7 +9,7 @@ const source = readFileSync(require.resolve('../wallet.js'), 'utf8');
 function setup() {
     const events = [], timers = new Map(); let timerId = 0;
     const window = { solanaWeb3: web3, confirm: () => true };
-    const document = { dispatchEvent(event) { events.push(event); } };
+    const document = { modalVisible: true, getElementById() { return {classList:{contains: () => document.modalVisible}}; }, dispatchEvent(event) { events.push(event); } };
     const context = vm.createContext({ window, document, console: { log() {}, error() {} }, TextEncoder, TextDecoder, Uint8Array, URL, URLSearchParams, atob, btoa,
         setTimeout(fn) { timers.set(++timerId, fn); return timerId; }, clearTimeout(id) { timers.delete(id); },
         CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options?.detail; } },
@@ -28,7 +28,7 @@ function setup() {
         async recoverWallet() { return { publicKey: pair.publicKey.toBase58(), seed: Buffer.from(seed).toString('base64url') }; } };
     client.solanaWeb3Ready = Promise.resolve();
     for (const method of ['showOverlay', 'hideOverlay', 'updateStatus', 'resetHeaderButton', 'updateHeaderButton', 'setLastUsedWallet']) client[method] = () => {};
-    return { client, Client, pair, events, timers, window };
+    return { client, Client, pair, events, timers, window, document };
 }
 
 test('social connect creates a real signer; messages and legacy/versioned transactions verify', async () => {
@@ -85,4 +85,36 @@ test('expiry and verification failure cannot leave a usable signer', async () =>
     const failed = setup(); failed.client.config.onVerify = async () => { throw new Error('verification failed'); };
     await failed.client.connectWallet('google');
     assert.equal(failed.client.state.isConnected, false); assert.equal(failed.client._socialSigner, null);
+});
+
+
+test('using a burner keeps social session but clears signer and returns to main wallet UI', async () => {
+    const s = setup(); let shown = 0, hidden = 0;
+    await s.client.connectWallet('google');
+    const session = s.client.socialAuth.session;
+    s.client.showOverlay = () => { shown++; };
+    s.client.hideOverlay = () => { hidden++; };
+    s.Client.getActiveBurnerId = () => 'burner-one';
+    s.Client.getBurnerWallets = () => [{id:'burner-one',name:'Burner',publicKey:'burner-address'}];
+    await s.client.connectWallet('burner');
+    assert.equal(s.client._socialSigner, null);
+    assert.equal(s.client.socialAuth.session, session);
+    for (const fn of [...s.timers.values()]) fn();
+    assert.equal(shown, 1);
+    assert.equal(hidden, 0);
+    assert.equal(s.client.state.walletAddress, 'burner-address');
+    assert.equal(s.events.filter(e => e.type === 'walletConnected').at(-1).detail.wallet, 'burner');
+    s.client.disconnect();
+    assert.equal(s.client.socialAuth.session, null);
+});
+
+test('silent burner selection and closing during connection never open the wallet manager', async () => {
+    const s = setup(); let shown = 0;
+    s.client.showOverlay = () => { shown++; };
+    s.client.state.walletAddress = 'burner';
+    s.client.onConnectSuccess('burner', 'burner');
+    s.document.modalVisible = false;
+    for (const fn of [...s.timers.values()]) fn();
+    assert.equal(shown, 0);
+    assert.equal(s.client.state.isConnected, true);
 });

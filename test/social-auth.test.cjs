@@ -6,10 +6,11 @@ const { webcrypto } = require('node:crypto');
 
 const walletSource = readFileSync(require.resolve('../wallet.js'), 'utf8');
 const source = walletSource.slice(walletSource.indexOf('class ProofWalletSocialAuth {'), walletSource.indexOf('class CryptoClient {'));
-function setup({ blocked = false, configured = true } = {}) {
+function setup({ blocked = false, configured = true, storage = new Map() } = {}) {
     const listeners = new Set(), calls = [], popups = [];
     const window = {
         location: { origin: 'https://proofnetwork.lol' },
+        sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
         open() {
             if (blocked) return null;
             const popup = { closed: false, url: '', location: { replace(url) { popup.url = url; } }, close() { popup.closed = true; } };
@@ -22,7 +23,7 @@ function setup({ blocked = false, configured = true } = {}) {
         async fetch(url, options) {
             calls.push({ url, options });
             if (url.endsWith('/providers')) return Response.json({ google: configured, x: configured });
-            if (url.endsWith('/result')) return Response.json({ status: 'authenticated', token: 'a'.repeat(43), expiresAt: Date.now() + 60000, identity: { id: 'identity', provider: 'google', name: 'Test' } });
+            if (url.endsWith('/result')) return Response.json({ status: 'authenticated', token: (new URL(popups.at(-1).url).searchParams.get('provider') === 'x' ? 'b' : 'a').repeat(43), expiresAt: Date.now() + 60000, identity: { id: 'identity', provider: new URL(popups.at(-1).url).searchParams.get('provider'), name: 'Test' } });
             return Response.json({ success: true });
         },
     });
@@ -36,7 +37,7 @@ function setup({ blocked = false, configured = true } = {}) {
     async function message(data, origin = auth.endpoint, source = popups.at(-1)) {
         await Promise.all([...listeners].map(fn => fn({ data, origin, source })));
     }
-    return { auth, Auth, calls, popups, ready, message, listeners };
+    return { auth, Auth, calls, popups, ready, message, listeners, storage, window };
 }
 
 test('popup completion binds source, origin, request ID and PKCE; logout clears memory', async () => {
@@ -105,4 +106,61 @@ test('new sign-in cancels previous attempt; expired sessions disappear', async (
     await cancelled;
     s.auth._session = { expiresAt: 1, identity: {} };
     assert.equal(s.auth.session, null);
+});
+
+async function login(s, provider = 'google') {
+    const pending = s.auth.signIn(provider);
+    const url = await s.ready();
+    await s.message({type: 'proofwallet:oauth-result', requestId: url.searchParams.get('request_id'), receipt: 'r'.repeat(43)});
+    return pending;
+}
+
+test('tab-local sessions resume without popup, keep providers separate, and revoke on explicit logout', async () => {
+    const s = setup();
+    const google = await login(s);
+    const x = await login(s, 'x');
+    assert.equal(s.storage.size, 2);
+    assert.equal(s.calls.filter(c => c.options.method === 'DELETE').length, 0, 'switching providers does not revoke the other');
+    const reloaded = new s.Auth();
+    assert.equal((await reloaded.signIn('google')).token, google.token);
+    assert.equal((await reloaded.signIn('x')).token, x.token);
+    assert.equal(s.popups.length, 2, 'resumption creates no popup');
+    assert.ok([...s.storage.values()].every(value => !/seed|privateKey|access_token/.test(value)));
+    await reloaded.signOut();
+    assert.equal(s.storage.size, 0);
+    assert.equal(s.calls.filter(c => c.options.method === 'DELETE').length, 2);
+    assert.equal(reloaded.session, null);
+});
+
+test('expired or malformed cached sessions are removed and start a new provider flow', async () => {
+    const s = setup();
+    s.storage.set(s.auth._storageKey('google'), JSON.stringify({token:'a'.repeat(43),expiresAt:Date.now()-1,identity:{id:'old',provider:'google'}}));
+    const pending = s.auth.signIn('google');
+    const cancelled = assert.rejects(pending, /cancelled/);
+    await s.ready();
+    assert.equal(s.storage.size, 0);
+    s.auth.cancel(); await cancelled;
+    s.storage.set(s.auth._storageKey('x'), '{broken json');
+    assert.equal(s.auth._cached('x'), null);
+    assert.equal(s.storage.size, 0);
+});
+
+test('fresh linking transport ignores cached sessions and leaves normal cache intact', async () => {
+    const s = setup(); await login(s);
+    const target = new s.Auth({rememberSession:false});
+    const pending = target.signIn('google');
+    const cancelled = assert.rejects(pending, /cancelled/);
+    await s.ready();
+    assert.equal(s.popups.length, 2);
+    target.cancel();await cancelled;await target.signOut();
+    assert.equal(s.storage.size, 1);
+});
+
+test('storage unavailable falls back to in-memory sessions', async () => {
+    const s = setup();
+    Object.defineProperty(s.window,'sessionStorage',{get(){throw new Error('storage blocked')}});
+    const logged = await login(s);
+    assert.equal((await s.auth.signIn('google')).token, logged.token);
+    assert.equal(s.popups.length, 1);
+    await s.auth.signOut();assert.equal(s.auth.session, null);
 });
