@@ -10054,10 +10054,12 @@ class CryptoClient {
         // Store it to prevent duplicates
         this._pendingCalls.set(callKey, callPromise);
 
-        // Clean up after completion (success or failure)
+        // Clean up after completion (success or failure).
+        // `.finally()` returns a NEW promise: if the call rejects, that copy rejects too and nobody awaits it,
+        // so the browser logs a spurious "Uncaught (in promise)" for an error the caller already handled.
         callPromise.finally(() => {
             this._pendingCalls.delete(callKey);
-        });
+        }).catch(() => {});
 
         return callPromise;
     }
